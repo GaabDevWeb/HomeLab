@@ -650,7 +650,8 @@ PanelWindow {
         command: ["sh", "-c",
             "f=\"$HOME/.config/foot/panacea-theme\"; mkdir -p \"$(dirname \"$f\")\" || exit 0; " +
             "if [ -n \"$1\" ]; then " +
-            "printf '[colors-dark]\\nbackground=%s\\n' \"$1\" > \"$f\"; " +
+            "sec=colors; printf '[colors-dark]\\nforeground=ffffff\\nbackground=000000\\n' | foot --check-config --config=/dev/stdin >/dev/null 2>&1 && sec=colors-dark; " +
+            "printf '[%s]\\nbackground=%s\\n' \"$sec\" \"$1\" > \"$f\"; " +
             "else : > \"$f\"; fi",
             "_", root.themeNothing ? root.termBg : ""]
     }
@@ -1069,6 +1070,14 @@ PanelWindow {
     // идёт с --no-deps, а хватать пакеты через sudo из-под кнопки в настройках
     // — не то, чего от него ждут. Поэтому просто называем их на том же экране.
     property string missingDeps: ""
+    // Arch-oriented install hints vs apt on Debian/Ubuntu.
+    property bool hasPacman: false
+    Process {
+        id: pDetectPacman
+        running: true
+        command: ["sh", "-c", "command -v pacman >/dev/null 2>&1"]
+        onExited: root.hasPacman = (exitCode === 0)
+    }
 
     // Простое копирование в буфер. Пароли идут своим путём — им нужен
     // --sensitive-data и очистка по таймеру, см. vaultCopy().
@@ -1368,8 +1377,12 @@ PanelWindow {
     // где её просят назвать и сохранить.
     property bool   wallpaperPickMode: false
     property string wallpaperPick: ""       // путь выбранной, ждёт имени
+    // Режим выбора папки: одна связанная директория с картинками в карусели.
+    property bool   wallpaperFolderPickMode: false
+    property string wallLibrary: ""         // путь связанной папки (или "")
     function startWallpaperPick() {
         wallsOpen = false;
+        wallpaperFolderPickMode = false;
         wallpaperPickMode = true;
         togglePage("files");
     }
@@ -1380,6 +1393,52 @@ PanelWindow {
         openWalls();
     }
     function cancelWallpaperPick() { wallpaperPick = ""; }
+
+    function startWallpaperFolderPick() {
+        wallsOpen = false;
+        wallpaperPickMode = false;
+        wallpaperFolderPickMode = true;
+        togglePage("files");
+    }
+    function finishWallpaperFolderPick(dir) {
+        wallpaperFolderPickMode = false;
+        collapse();
+        pWallLibSet.command = ["sh", "-c",
+            root.scriptDir + "/themes.sh library set \"$1\"", "_", dir];
+        pWallLibSet.running = true;
+    }
+    function cancelWallpaperFolderPick() { wallpaperFolderPickMode = false; }
+    function clearWallpaperLibrary() {
+        pWallLibClear.command = ["sh", "-c", root.scriptDir + "/themes.sh library clear"];
+        pWallLibClear.running = true;
+    }
+    function refreshWallLibrary() {
+        pWallLibGet.running = false;
+        pWallLibGet.running = true;
+    }
+    Process {
+        id: pWallLibGet
+        command: ["sh", "-c", root.scriptDir + "/themes.sh library"]
+        running: true
+        stdout: StdioCollector { onStreamFinished: root.wallLibrary = text.trim() }
+    }
+    Process {
+        id: pWallLibSet
+        stdout: StdioCollector {
+            onStreamFinished: {
+                root.wallLibrary = text.trim();
+                root.refreshWalls();
+                root.openWalls();
+            }
+        }
+    }
+    Process {
+        id: pWallLibClear
+        onRunningChanged: if (!running) {
+            root.wallLibrary = "";
+            root.refreshWalls();
+        }
+    }
 
     function openMedia(path) {
         if (!cfg.featMedia) return;
@@ -1572,6 +1631,7 @@ PanelWindow {
         pWallList.running = false;
         pWallList.running = true;
         root.refreshLiveWalls();
+        root.refreshWallLibrary();
     }
 
     // ------------------------------------------------------- живые обои
@@ -1803,6 +1863,13 @@ PanelWindow {
     function openAgents() {
         root.agentsEpoch++;
         togglePage("agents");
+    }
+
+    // Gaab Homelab console — mesma forma de Agents: epoch força refresh no view.
+    property int homelabEpoch: 0
+    function openHomelab() {
+        root.homelabEpoch++;
+        togglePage("homelab");
     }
 
     // ----------------------------------------------------- стоп-кадр экрана
@@ -3826,6 +3893,7 @@ PanelWindow {
         function filesAt(path: string): void { root.openFilesAt(path); }
         function passwords(): void { root.togglePage("vault"); }
         function agents(): void { root.openAgents(); }
+        function homelab(): void { root.openHomelab(); }
         function media(path: string): void { root.openMedia(path); }
         // переключить выделение области в плеере (то же, что кнопка «Кроп»)
         function mediaCrop(): void { root.mediaCropToggle(); }
@@ -5918,6 +5986,7 @@ PanelWindow {
                            : root.page === "vault"    ? vaultComp
                            : root.page === "vaultsave" ? vaultSaveComp
                            : root.page === "agents"   ? agentsComp
+                           : root.page === "homelab"  ? homelabComp
                                                       : controlsComp
         }
 
@@ -5936,6 +6005,7 @@ PanelWindow {
         Component { id: vaultComp;     VaultView { sys: root } }
         Component { id: vaultSaveComp; VaultSaveView { sys: root } }
         Component { id: agentsComp;    AgentsView { sys: root } }
+        Component { id: homelabComp;   HomelabView { sys: root } }
     }
 
     // ------------------------------------------------ отдельная плавающая панель

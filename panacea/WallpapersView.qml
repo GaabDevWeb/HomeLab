@@ -752,6 +752,70 @@ Item {
                 onClicked: view.sys.startWallpaperPick()
             }
         }
+
+        // Связанная папка: картинки появляются в карусели без копирования.
+        Rectangle {
+            visible: !view.live
+            Layout.preferredWidth: Math.max(156, libRow.implicitWidth + 24)
+            Layout.preferredHeight: 38
+            radius: 13
+            color: libMa.containsMouse ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.06)
+            border.color: libMa.containsMouse ? view.sys.colOn : view.sys.colLine
+            border.width: 1
+            Behavior on color { ColorAnimation { duration: 160 } }
+            Behavior on border.color { ColorAnimation { duration: 160 } }
+
+            RowLayout {
+                id: libRow
+                anchors.centerIn: parent
+                spacing: 8
+                Text {
+                    text: String.fromCodePoint(0xF024B)
+                    color: libMa.containsMouse ? view.sys.colOn : view.sys.colMuted
+                    font { family: view.sys.fontFam; pixelSize: 16 }
+                }
+                Text {
+                    text: view.sys.wallLibrary.length
+                          ? (view.sys.wallLibrary.split("/").pop() || view.sys.tr("Папка обоев"))
+                          : view.sys.tr("Папка обоев")
+                    color: libMa.containsMouse ? view.sys.colFg : view.sys.colMuted
+                    font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 3 }
+                }
+            }
+            MouseArea {
+                id: libMa
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: view.sys.startWallpaperFolderPick()
+            }
+        }
+
+        // Отвязать папку, если уже связана
+        Rectangle {
+            visible: !view.live && view.sys.wallLibrary.length > 0
+            Layout.preferredWidth: 38
+            Layout.preferredHeight: 38
+            radius: 13
+            color: libClearMa.containsMouse ? view.sys.colCrit : Qt.rgba(1, 1, 1, 0.06)
+            border.color: libClearMa.containsMouse ? view.sys.colCrit : view.sys.colLine
+            border.width: 1
+            Behavior on color { ColorAnimation { duration: 160 } }
+
+            Text {
+                anchors.centerIn: parent
+                text: String.fromCodePoint(0xF0156)
+                color: libClearMa.containsMouse ? "#ffffff" : view.sys.colMuted
+                font { family: view.sys.fontFam; pixelSize: 15 }
+            }
+            MouseArea {
+                id: libClearMa
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: view.sys.clearWallpaperLibrary()
+            }
+        }
     }
 
     // ------------------------------------------------------ удаление своих

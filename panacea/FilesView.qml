@@ -16,6 +16,10 @@ Item {
     property int  windowId: 0
 
     function leave() {
+        if (view.sys.wallpaperFolderPickMode)
+            view.sys.cancelWallpaperFolderPick();
+        if (view.sys.wallpaperPickMode)
+            view.sys.wallpaperPickMode = false;
         if (view.windowMode) view.sys.closeFilesWindow(view.windowId);
         else                 view.sys.collapse();
     }
@@ -1149,10 +1153,49 @@ Item {
                 }
                 Text {
                     Layout.fillWidth: true
-                    text: view.status.length ? view.status : view.dir
-                    color: view.status.length ? view.sys.colOn : view.sys.colMuted
+                    text: view.sys.wallpaperFolderPickMode
+                          ? view.sys.tr("Выберите папку с обоями")
+                          : (view.status.length ? view.status : view.dir)
+                    color: view.sys.wallpaperFolderPickMode || view.status.length
+                           ? view.sys.colOn : view.sys.colMuted
                     elide: Text.ElideMiddle
                     font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 3 }
+                }
+            }
+
+            // Режим связи папки обоев: подтверждаем текущий каталог.
+            Rectangle {
+                visible: view.sys.wallpaperFolderPickMode
+                Layout.preferredWidth: Math.max(148, useFolderRow.implicitWidth + 24)
+                Layout.preferredHeight: 38
+                radius: 13
+                color: useFolderMa.containsMouse ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.06)
+                border.color: useFolderMa.containsMouse ? view.sys.colOn : view.sys.colLine
+                border.width: 1
+                Behavior on color { ColorAnimation { duration: 140 } }
+                Behavior on border.color { ColorAnimation { duration: 140 } }
+
+                RowLayout {
+                    id: useFolderRow
+                    anchors.centerIn: parent
+                    spacing: 8
+                    Text {
+                        text: String.fromCodePoint(0xF012C)
+                        color: useFolderMa.containsMouse ? view.sys.colOn : view.sys.colMuted
+                        font { family: view.sys.fontFam; pixelSize: 15 }
+                    }
+                    Text {
+                        text: view.sys.tr("Использовать эту папку")
+                        color: useFolderMa.containsMouse ? view.sys.colFg : view.sys.colMuted
+                        font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2 }
+                    }
+                }
+                MouseArea {
+                    id: useFolderMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: view.sys.finishWallpaperFolderPick(view.dir)
                 }
             }
 

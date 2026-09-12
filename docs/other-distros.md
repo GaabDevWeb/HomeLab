@@ -3,14 +3,54 @@
 *Note: parts of this write-up were drafted with AI assistance while working through the setup.*
 
 Panacea targets and is tested on Arch Linux. This document collects the adjustments needed to run
-it on an Ubuntu/Debian base (tested on Ubuntu 24.04 / Linux Mint 22.3). This isn't an attempt at
-official support, just a reference for anyone trying the same path.
+it on an Ubuntu/Debian base. The installer (`install.sh`) auto-detects `apt` and installs what it
+can; the notes below cover what still differs by release.
+
+---
+
+## Debian 13 (trixie) — recommended apt path
+
+Tested against Debian 13 with Hyprland from **trixie-backports** (e.g. Hyprland 0.55.x).
+
+| Component | Status on Debian 13 |
+|---|---|
+| Hyprland Lua config | Supported (0.55+ prefers `~/.config/hypr/hyprland.lua`) |
+| Qt | System Qt **6.8.x** — enough for Quickshell; **no** `~/Qt` / aqtinstall needed |
+| foot | **1.21** in main — use `[colors]` (Debian build has no `[colors-dark]` yet); `cursor.blink-rate` OK |
+| fish | **4.x** in main |
+| hyprpaper / hyprsunset | **trixie-backports** (installer pulls them with `-t trixie-backports`) |
+| Quickshell | Not packaged; build from source **or** use a prebuilt `/usr/local/bin/qs` |
+| mpvpaper | Not packaged; installer builds from source when `meson` + `libmpv-dev` are present |
+| voxtype | Not in Debian repos — voice-to-text stays optional / manual |
+| QML module paths | Multiarch: `/usr/lib/x86_64-linux-gnu/qt6/qml/...` (installer checks both Arch and Debian paths) |
+
+Enable backports if missing:
+
+```bash
+# /etc/apt/sources.list — example
+deb http://deb.debian.org/debian trixie-backports main non-free-firmware
+sudo apt update
+```
+
+Then:
+
+```bash
+cd Panacea
+./install.sh
+```
+
+Networking: the installer keeps **NetworkManager** and points Wi‑Fi at the **iwd** backend
+(`wifi.backend=iwd`) instead of tearing NM down. That matches typical Debian desktops better than
+the older “disable NM entirely” approach below.
+
+Fish abbreviations switch to `apt` automatically when `pacman` is absent (`upd`, `ins`, …).
 
 ---
 
 ## 1. Quickshell isn't packaged
 
-Ubuntu/Debian don't have Quickshell in their official repos. Building from source is required.
+Ubuntu/Debian don't have Quickshell in their official repos. Building from source is required
+unless you already have `qs` / `quickshell` on `PATH` (the installer skips the build in that case).
 
 ### Dependencies
 
@@ -30,13 +70,15 @@ The `-private-dev` packages are needed because Debian/Ubuntu split Qt's private 
 separate packages (official Qt builds include them by default). Without them, the build fails
 with `Imported target "Qt::QuickPrivate" includes non-existent path`.
 
-### System Qt is too old
+### System Qt: Debian 13 vs older Ubuntu
 
-Ubuntu 24.04 ships Qt 6.4.2. Quickshell declares Qt 6.6 as the minimum, but in practice some moc
+**Debian 13:** system Qt 6.8 is fine. Build against it (what `install.sh` does).
+
+**Ubuntu 24.04** ships Qt 6.4.2. Quickshell declares Qt 6.6 as the minimum, but in practice some moc
 constructs used in the code (`Q_PROPERTY(... READ default ...)`) require a newer version. With
 6.4.2 the build fails with `Parse error at "READ"`.
 
-Fix: install a newer Qt in a separate directory (without touching the system one) via
+Fix on old Ubuntu: install a newer Qt in a separate directory via
 [aqtinstall](https://github.com/miurahr/aqtinstall):
 
 ```bash
@@ -44,7 +86,7 @@ pip install aqtinstall --break-system-packages
 python3 -m aqt install-qt linux desktop 6.7.3 linux_gcc_64 -O ~/Qt -m qtshadertools qtmultimedia
 ```
 
-### Build
+### Build (custom Qt — Ubuntu 24.04 path)
 
 ```bash
 git clone https://github.com/quickshell-mirror/quickshell.git
@@ -63,18 +105,12 @@ sudo cmake --install build
 ```
 
 Things to note:
-- `CMAKE_PREFIX_PATH` must point to the downloaded Qt, not the system one.
-- `-DNO_PCH=ON` is required with `SERVICE_POLKIT=ON`. Without it, the build fails with
-  `error: POSIX thread support was disabled in PCH file but is currently enabled`, a conflict
-  between the `-pthread` flags pulled in by glib/gobject (a Polkit dependency) and the shared
-  precompiled header, generated without that flag for other targets in the project.
+- `CMAKE_PREFIX_PATH` must point to the downloaded Qt, not the system one (Ubuntu 24.04 only).
+- `-DNO_PCH=ON` is required with `SERVICE_POLKIT=ON`.
 - On low-RAM hardware, limit parallel jobs (`cmake --build build -j2`) and consider adding
   temporary swap.
 
-### Runtime
-
-The resulting binary links against the custom Qt, not the system one. At runtime you need to
-export:
+### Runtime (custom Qt only)
 
 ```bash
 export LD_LIBRARY_PATH="$HOME/Qt/6.7.3/gcc_64/lib:$LD_LIBRARY_PATH"
@@ -82,20 +118,17 @@ export QML2_IMPORT_PATH="$HOME/Qt/6.7.3/gcc_64/qml:$QML2_IMPORT_PATH"
 export QT_PLUGIN_PATH="$HOME/Qt/6.7.3/gcc_64/plugins:$QT_PLUGIN_PATH"
 ```
 
-On Hyprland, the cleanest approach is setting these as session-scoped environment variables
-(`env = NAME,value` in the classic `.conf`, or the equivalent in whatever config syntax you use)
-rather than in a global `.bashrc`/`.zshrc`. This avoids other system Qt applications picking up
-the wrong version.
+On Hyprland, set these as session env (`hl.env` / `env =`) rather than in a global shell rc so
+other system Qt apps do not pick up the private tree.
 
 ---
 
-## 2. foot in the repos is too old
+## 2. foot on older Ubuntu
 
-Panacea's theme uses `[colors-dark]` (a color-scheme-aware section) and `cursor.blink-rate`,
-features not present in `foot` 1.16.2 (the version shipped in Ubuntu 24.04). Symptom: the terminal
-opens with config parsing errors and falls back to default font/colors.
+Panacea's theme uses `[colors-dark]` and `cursor.blink-rate`. Ubuntu 24.04's foot 1.16.2 is too
+old; Debian 13's 1.21 is fine from the repos.
 
-Build from source (a lightweight project, no Qt dependency, compiles in a few minutes):
+Build from source only if your distro foot is &lt; ~1.18:
 
 ```bash
 sudo apt install -y meson ninja-build scdoc \
@@ -110,44 +143,33 @@ ninja -C build
 sudo ninja -C build install
 ```
 
-`tllist` and `fcft` (dependencies not packaged on Ubuntu) are downloaded automatically by Meson as
-subprojects.
-
 ---
 
 ## 3. Packages with no direct equivalent
 
 | Arch/AUR package | Ubuntu/Debian alternative |
 |---|---|
-| `bat` | package is called `bat`, but the binary is `batcat`, needs a manual alias (`ln -sf /usr/bin/batcat ~/.local/bin/bat`) |
-| `yazi` | not in the repos; via `cargo install --force yazi-build` (not `yazi-fm`/`yazi-cli` directly, those fail with an explicit error pointing to the correct wrapper) |
-| `mpvpaper` | not in the repos (AUR-only on Arch); simple build from source, no Qt dependency: `github.com/GhostNaN/mpvpaper`, `meson setup build && ninja -C build && sudo ninja -C build install` |
-| `bibata-cursor-theme-bin` | not in the repos; not addressed in this setup, you can keep whatever cursor theme is already on the system |
+| `bat` | package is called `bat`, but the binary may be `batcat` — installer links `~/.local/bin/bat` |
+| `yazi` | binary release via installer (`ensure_yazi`) or `cargo install --force yazi-build` |
+| `mpvpaper` | built from source by the installer (`ensure_mpvpaper`) |
+| `voxtype` / `voxtype-bin` | not packaged — install manually if you want Right-Alt dictation |
+| `bibata-cursor-theme-bin` | installer downloads Bibata into `~/.local/share/icons` |
 
 ---
 
-## 4. NetworkManager / iwd conflict
+## 4. NetworkManager / iwd
 
-Panacea's Wi-Fi script (`panacea/scripts/wifi.sh`) talks directly to `iwd` via `iwctl` and is
-written assuming NetworkManager isn't present, typical of a minimal Arch install, but not the
-default on Ubuntu/Mint (where NetworkManager manages Wi-Fi out of the box).
+Panacea's Wi-Fi script talks to `iwd` via `iwctl`. On Debian/Ubuntu, NetworkManager usually owns
+Wi-Fi. The installer configures:
 
-Running both side by side causes a sequence of non-obvious issues:
+```ini
+# /etc/NetworkManager/conf.d/wifi_backend.conf
+[device]
+wifi.backend=iwd
+```
 
-1. `iwctl station ... connect` fails with `Operation aborted`. NetworkManager/wpa_supplicant
-   compete with iwd for the interface, even after marking the device `unmanaged` in
-   NetworkManager.
-2. With the interface set to `unmanaged`, the connection authenticates but never gets an IP
-   (`NO-CARRIER`). Nobody does DHCP on iwd's behalf anymore.
-3. Even after enabling iwd's internal DHCP (`EnableNetworkConfiguration=true` in
-   `/etc/iwd/main.conf`), iwd's log shows `netconfig agent call returned
-   org.freedesktop.NetworkManager.Device.InvalidConnection`. NetworkManager registers itself as
-   the system-wide netconfig agent for iwd regardless of the individual device's `unmanaged`
-   state, and rejects the request.
-
-**Fix applied** (a bit drastic, but consistent with the script's own assumption): remove
-NetworkManager from the equation entirely, leaving iwd for Wi-Fi and systemd-networkd for
-Ethernet.
+If you still see auth/DHCP races, the older hard cutover (disable NM, iwd + systemd-networkd) is
+documented historically below — use only if the backend switch is not enough.
 
 ```bash
 sudo systemctl stop wpa_supplicant
@@ -164,36 +186,24 @@ sudo systemctl enable --now systemd-networkd
 sudo systemctl enable --now systemd-resolved
 ```
 
-(the `Name=en*` match instead of the exact interface name is useful if you're using USB-Ethernet
-adapters whose name/MAC changes between sessions)
-
-A less drastic alternative, telling NetworkManager to explicitly ignore only the Wi-Fi interface
-while keeping it for Ethernet, was tried but didn't fix issue 3, since NetworkManager's netconfig
-agent registration for iwd doesn't appear to be gated by per-device state.
-
 ---
 
-## 5. `install.sh` behavior on Ubuntu
+## 5. `install.sh` behavior on Debian/Ubuntu
 
-The script is written for Arch (pacman/AUR), but most of the logic after the dependency check
-(backups, file copying, `systemctl enable/mask`) is distro-agnostic. Observed behavior:
-
-- `install_deps()`: if `pacman` isn't present, it warns and continues without blocking. Still
-  worth running with `--no-deps` after manually installing packages (see section 3 above).
-- The `--print-obsolete` flag exits immediately if `pacman` isn't present, harmlessly.
-- GRUB theme: only modifies specific keys in `/etc/default/grub` (with an automatic backup) and
-  regenerates `grub.cfg` via `grub-mkconfig`. It never calls `grub-install`, so the operation is
-  standard and reversible even on a dual-boot Ubuntu system.
-- SDDM theme: self-disables if `sddm` isn't installed (the default on many Ubuntu-based distros
-  using LightDM). No display manager conflict.
+- Detects `apt`, skips AUR helper prompts.
+- Installs Hyprland-related packages from **trixie-backports** when that suite exists.
+- Builds Quickshell only if `qs`/`quickshell` is missing; on Debian 13 uses system Qt.
+- Builds mpvpaper from source when missing.
+- `--print-obsolete` is Arch-only (exits cleanly without pacman).
+- GRUB/SDDM themes are optional prompts; safe to decline.
 
 ---
 
 ## Possibly distro-independent bug
 
-While adapting this, it turned out `hypr/lua/programs.lua` and some binds in
-`hypr/lua/keybindings.lua` (volume/brightness) contain paths hardcoded to the original install's
-home directory (`/home/ensi/...`). The `personalize_paths()` mechanism in `install.sh` fixes most
-of these during installation, but it's worth checking
-`grep -rn "/home/ensi" ~/.config/hypr ~/.config/panacea` after a fresh install, regardless of which
-distro you're on.
+`hypr/lua/programs.lua` and some binds historically contained `/home/ensi/...`.
+`personalize_paths()` in `install.sh` rewrites those to `$HOME` after copy. After install, verify:
+
+```bash
+grep -rn "/home/ensi" ~/.config/hypr ~/.config/panacea || echo "ok"
+```

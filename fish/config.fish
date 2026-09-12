@@ -46,20 +46,28 @@ end
 # Обновление системы и установка пакетов целыми словами. abbr разворачивается
 # в команду прямо в строке — видно, что именно сейчас уйдёт под sudo, и это
 # важнее экономии на нажатиях, когда речь о -Syu.
-abbr -a upd 'sudo pacman -Syu'
-abbr -a ins 'sudo pacman -S'
-
-# Pacman base
-abbr -a i 'sudo pacman -S'       # Installa
-abbr -a syu 'sudo pacman -Syu'     # Aggiorna sistema
-abbr -a r 'sudo pacman -Rns'      # Rimuove con dipendenze inutilizzate
-abbr -a pacc 'pacman -Ss'           # Cerca nei repo
-abbr -a pace 'pacman -Qe'         # Elenca pacchetti installati esplicitamente
-
-# Se usi un AUR helper (es. yay o paru)
-abbr -a y 'yay'                     # Scorciatoia universale per AUR
-abbr -a yi 'yay -S'
-abbr -a ysyu 'yay -Syu'
+if type -q pacman
+    abbr -a upd 'sudo pacman -Syu'
+    abbr -a ins 'sudo pacman -S'
+    abbr -a i 'sudo pacman -S'
+    abbr -a syu 'sudo pacman -Syu'
+    abbr -a r 'sudo pacman -Rns'
+    abbr -a pacc 'pacman -Ss'
+    abbr -a pace 'pacman -Qe'
+    if type -q yay
+        abbr -a y 'yay'
+        abbr -a yi 'yay -S'
+        abbr -a ysyu 'yay -Syu'
+    end
+else if type -q apt
+    abbr -a upd 'sudo apt update && sudo apt upgrade'
+    abbr -a ins 'sudo apt install'
+    abbr -a i 'sudo apt install'
+    abbr -a syu 'sudo apt update && sudo apt upgrade'
+    abbr -a r 'sudo apt remove --purge'
+    abbr -a pacc 'apt search'
+    abbr -a pace 'apt list --installed'
+end
 
 # Git
 abbr -a gs 'git status'

@@ -38,15 +38,25 @@ if [ -f "$FF" ]; then
 fi
 
 # ------------------------------------------------------------------- foot
-# Foot не хочет '#' в значениях цветов
+# Foot не хочет '#' в значениях цветов.
+#
+# Prefer [colors]: Debian 13 ships foot 1.21 without [colors-dark] (that
+# dual-scheme section arrived later upstream). [colors] works on every
+# supported foot; we also force prefer-dark via gsettings below.
 if [ -d "$HOME/.config/foot" ]; then
+    _foot_sec=colors
+    if printf '[colors-dark]\nforeground=ffffff\nbackground=000000\n' \
+        | foot --check-config --config=/dev/stdin >/dev/null 2>&1; then
+        _foot_sec=colors-dark
+    fi
     cat > "$HOME/.config/foot/theme" <<EOF
-[colors-dark]
+[${_foot_sec}]
 foreground=${FG#\#}
 background=${TERM_BG#\#}
 selection-foreground=${TERM_BG#\#}
 selection-background=${FG#\#}
 EOF
+    unset _foot_sec
 fi
 
 # Секцию [colors-dark] foot читает, только если портал сообщает

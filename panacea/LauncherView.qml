@@ -73,6 +73,14 @@ FocusScope {
         genericName: view.sys.tr("Тарифы и лимиты установленных ИИ-агентов"),
         keys: "agents agent ai claude codex gemini copilot cursor limits usage plan "
               + "агенты агент лимиты тариф подписка нагрузка"
+    }, {
+        builtin: "homelab",
+        id: "panacea:homelab",
+        glyph: String.fromCodePoint(0xF035B),      // md-server
+        name: view.sys.tr("Homelab"),
+        genericName: view.sys.tr("Console operacional do Gaab Homelab"),
+        keys: "homelab home lab sys net docker ollama systemd services logs storage "
+              + "servidor console gaab"
     }]
 
     // ------------------------------------------------- другие системы на диске
@@ -236,6 +244,7 @@ FocusScope {
         // из того же списка и тем же Enter, и в следующий раз она должна
         // ждать сверху, а не на своём месте по алфавиту.
         if (app.builtin === "agents") { rememberApp(app); sys.openAgents(); return; }
+        if (app.builtin === "homelab") { rememberApp(app); sys.openHomelab(); return; }
         // Систему в недавние НЕ записываем. Недавние — это «чем я пользуюсь»,
         // а перезагрузка в другую систему случается раз в неделю и после неё
         // висела бы первой строкой в пустом лаунчере до конца времён. Причём

@@ -21,10 +21,19 @@ make_thumb() {
     local src="$1"
     [ -f "$src" ] || return 1
 
-    local name
-    name=$(basename "$src")
-    name="${name%.*}.jpg"
-    local dst="$CACHE/$name"
+    local name dst
+    # Файлы вне каталога обоев (связанная папка): имя по хэшу пути,
+    # иначе два foo.png из разных мест делят один кеш.
+    case "$src" in
+        "$WALLS"/*)
+            name=$(basename "$src")
+            name="${name%.*}.jpg"
+            ;;
+        *)
+            name="lib_$(printf '%s' "$src" | md5sum | awk '{print $1}' | cut -c1-16).jpg"
+            ;;
+    esac
+    dst="$CACHE/$name"
 
     if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then
         # -noautorotate не нужен, обои без EXIF; q=5 хватает для превью
@@ -71,7 +80,14 @@ case "$1" in
         # карусели в минуты ожидания: обоев теперь сотни, а не полтора десятка.
         src="$2"
         [ -f "$src" ] || exit 1
-        name=$(basename "$src"); name="${name%.*}.jpg"
+        case "$src" in
+            "$WALLS"/*)
+                name=$(basename "$src"); name="${name%.*}.jpg"
+                ;;
+            *)
+                name="lib_$(printf '%s' "$src" | md5sum | awk '{print $1}' | cut -c1-16).jpg"
+                ;;
+        esac
         dst="$CACHE/$name"
         [ -f "$dst" ] && [ ! "$src" -nt "$dst" ] && printf '%s\n' "$dst"
         ;;
@@ -82,6 +98,17 @@ case "$1" in
         | while read -r f; do
             make_thumb "$f" >/dev/null
         done
+        # Связанная папка пользователя (одна): только корень
+        lib=""
+        [ -f "$WALLS/library.path" ] && lib=$(head -n1 "$WALLS/library.path" | sed 's/^ *//; s/ *$//')
+        lib="${lib/#\~/$HOME}"
+        if [ -n "$lib" ] && [ -d "$lib" ]; then
+            find "$lib" -maxdepth 1 -type f \
+                 \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' \) \
+            | while read -r f; do
+                make_thumb "$f" >/dev/null
+            done
+        fi
         ;;
     *)
         echo "usage: thumbs.sh thumb <path> | lockbg <path> | all" >&2

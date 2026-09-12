@@ -574,7 +574,9 @@ Item {
             // висеть в системе навсегда.
             DepsNotice {
                 text: view.sys.tr("Не хватает пакетов")
-                cmd: "sudo pacman -S --needed " + view.sys.missingDeps
+                cmd: view.sys.hasPacman
+                    ? "sudo pacman -S --needed " + view.sys.missingDeps
+                    : "sudo apt install " + view.sys.missingDeps
                 shown: view.sys.missingDeps.length > 0
                 tone: view.sys.colCrit
             }
@@ -582,7 +584,7 @@ Item {
             DepsNotice {
                 text: view.sys.tr("Больше не нужны")
                 cmd: "sudo pacman -Rns " + view.sys.obsoleteDeps
-                shown: view.sys.obsoleteDeps.length > 0
+                shown: view.sys.obsoleteDeps.length > 0 && view.sys.hasPacman
                 tone: view.sys.colMuted
             }
 

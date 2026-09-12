@@ -151,13 +151,15 @@ DEPS=(
     "lspci|pciutils|naming the graphics card on the System page"
     "timedatectl|systemd|time zone and clock on the Clock & Date page"
 )
+# Paths: Arch/Fedora use /usr/lib/qt6; Debian/Ubuntu use multiarch
+# /usr/lib/<triplet>/qt6. check_deps accepts any existing candidate.
 FILE_DEPS=(
-    "/usr/lib/qt6/qml/QtMultimedia/qmldir|qt6-multimedia|video playback"
-    "/usr/lib/qt6/qml/QtQuick/Controls/qmldir|qt6-declarative|UI controls"
+    "/usr/lib/qt6/qml/QtMultimedia/qmldir|/usr/lib/x86_64-linux-gnu/qt6/qml/QtMultimedia/qmldir|qt6-multimedia|video playback"
+    "/usr/lib/qt6/qml/QtQuick/Controls/qmldir|/usr/lib/x86_64-linux-gnu/qt6/qml/QtQuick/Controls/qmldir|qt6-declarative|UI controls"
     # MultiEffect — скруглённые маски превью обоев и макетов настроек,
     # Shapes — вогнутые уголки примыкания острова на макетах
-    "/usr/lib/qt6/qml/QtQuick/Effects/qmldir|qt6-declarative|rounded image masks"
-    "/usr/lib/qt6/qml/QtQuick/Shapes/qmldir|qt6-declarative|island notch corners"
+    "/usr/lib/qt6/qml/QtQuick/Effects/qmldir|/usr/lib/x86_64-linux-gnu/qt6/qml/QtQuick/Effects/qmldir|qt6-declarative|rounded image masks"
+    "/usr/lib/qt6/qml/QtQuick/Shapes/qmldir|/usr/lib/x86_64-linux-gnu/qt6/qml/QtQuick/Shapes/qmldir|qt6-declarative|island notch corners"
 )
 EXTRA_PKGS=(power-profiles-daemon bluez bluez-utils iwd cava pipewire-audio
             ttf-jetbrains-mono-nerd papirus-icon-theme
@@ -347,11 +349,15 @@ check_deps() {
         else warn "missing $bin — $why"; MISSING+=("$pkg"); fi
     done
     for row in "${FILE_DEPS[@]}"; do
-        IFS='|' read -r path pkg why <<<"$row"
-        if [ -e "$path" ]; then ok "$pkg"
+        IFS='|' read -r path alt pkg why <<<"$row"
+        # Compat: rows may be path|pkg|why (3) or path|alt|pkg|why (4).
+        if [ -z "$why" ]; then
+            why="$pkg"; pkg="$alt"; alt=""
+        fi
+        if [ -e "$path" ] || { [ -n "$alt" ] && [ -e "$alt" ]; }; then ok "$pkg"
         else warn "missing $pkg — $why"; MISSING+=("$pkg"); fi
     done
-    if fc-list 2>/dev/null | grep -i "JetBrainsMono.*Nerd" >/dev/null; then ok "JetBrainsMono Nerd Font"
+    if fc-list 2>/dev/null | grep -iE "JetBrainsMono.*Nerd|Nerd Font.*JetBrains" >/dev/null; then ok "JetBrainsMono Nerd Font"
     else warn "missing the Nerd Font — every icon is a glyph"; MISSING+=("$FONT_PKG"); fi
     if [ "$PKG_MGR" = "pacman" ]; then
         MISSING+=("${EXTRA_PKGS[@]}")
@@ -386,6 +392,11 @@ install_aur_helper() {
 }
 
 check_aur_helper() {
+    detect_distro
+    if [ "$PKG_MGR" != "pacman" ]; then
+        ok "AUR helper not needed on $DISTRO ($PKG_MGR)"
+        return 0
+    fi
     local h; h=$(aur_helper)
     if [ -n "$h" ]; then
         ok "AUR helper: $h — skipping"
@@ -455,28 +466,52 @@ ensure_bibata_cursor() {
 }
 
 ensure_quickshell() {
-    command -v qs >/dev/null 2>&1 || command -v quickshell >/dev/null 2>&1 && return 0
+    if command -v qs >/dev/null 2>&1 || command -v quickshell >/dev/null 2>&1; then
+        return 0
+    fi
     step "Installing Quickshell..."
     if [ "$PKG_MGR" = "apt" ]; then
-        local qt_dir="$HOME/Qt/6.7.3/gcc_64"
-        if [ ! -d "$qt_dir" ]; then
-            step "Installing Qt 6.7.3 via aqtinstall for Quickshell..."
-            pip3 install --quiet --break-system-packages aqtinstall 2>/dev/null || pip install --quiet aqtinstall 2>/dev/null || true
-            python3 -m aqt install-qt linux desktop 6.7.3 linux_gcc_64 -O "$HOME/Qt" -m qtshadertools qtmultimedia >/dev/null 2>&1 || true
+        # Debian 13 (trixie) ships Qt ≥ 6.8 — build against system Qt.
+        # Older Ubuntu LTS still needs a private Qt under ~/Qt (see docs/other-distros.md).
+        local qt_prefix=""
+        local sys_qt
+        sys_qt="$(qmake6 -query QT_INSTALL_PREFIX 2>/dev/null || true)"
+        local sys_ver
+        sys_ver="$(qmake6 -query QT_VERSION 2>/dev/null || true)"
+        if [ -n "$sys_ver" ] && dpkg --compare-versions "$sys_ver" ge "6.6" 2>/dev/null; then
+            qt_prefix="${sys_qt:-/usr}"
+            ok "using system Qt $sys_ver for Quickshell"
+        else
+            local qt_dir="$HOME/Qt/6.7.3/gcc_64"
+            if [ ! -d "$qt_dir" ]; then
+                step "Installing Qt 6.7.3 via aqtinstall for Quickshell..."
+                pip3 install --quiet --break-system-packages aqtinstall 2>/dev/null || pip install --quiet aqtinstall 2>/dev/null || true
+                python3 -m aqt install-qt linux desktop 6.7.3 linux_gcc_64 -O "$HOME/Qt" -m qtshadertools qtmultimedia >/dev/null 2>&1 || true
+            fi
+            [ -d "$qt_dir" ] && qt_prefix="$qt_dir"
         fi
-        if [ -d "$qt_dir" ]; then
+        if [ -n "$qt_prefix" ]; then
             local build_tmp; build_tmp="$(mktemp -d)"
+            local cmake_prefix_args=()
+            local qml_dir=""
+            if [ "$qt_prefix" != "/usr" ] && [ "$qt_prefix" != "/usr/lib/x86_64-linux-gnu/qt6" ]; then
+                cmake_prefix_args=(-DCMAKE_PREFIX_PATH="$qt_prefix")
+                qml_dir="$qt_prefix/qml"
+            else
+                qml_dir="/usr/lib/x86_64-linux-gnu/qt6/qml"
+                [ -d "$qml_dir" ] || qml_dir="/usr/lib/qt6/qml"
+            fi
             (
                 cd "$build_tmp" || exit 1
                 git clone --depth 1 -q https://github.com/quickshell-mirror/quickshell.git || exit 1
                 cd quickshell || exit 1
                 cmake -GNinja -B build -DCMAKE_BUILD_TYPE=Release \
-                  -DCMAKE_PREFIX_PATH="$qt_dir" \
+                  "${cmake_prefix_args[@]}" \
                   -DCMAKE_CXX_COMPILER=clang++ \
                   -DCRASH_HANDLER=OFF -DX11=OFF -DI3=OFF -DI3_IPC=OFF \
                   -DSERVICE_PAM=ON -DSERVICE_POLKIT=ON -DSCREENCOPY=ON \
                   -DNO_PCH=ON \
-                  -DINSTALL_QMLDIR="$qt_dir/qml" >/dev/null 2>&1 || exit 1
+                  -DINSTALL_QMLDIR="$qml_dir" >/dev/null 2>&1 || exit 1
                 cmake --build build >/dev/null 2>&1 || exit 1
                 $SUDO cmake --install build >/dev/null 2>&1 || exit 1
             )
@@ -488,6 +523,30 @@ ensure_quickshell() {
         fi
     fi
     warn "Quickshell not found — see docs/other-distros.md for instructions"
+    return 1
+}
+
+ensure_mpvpaper() {
+    command -v mpvpaper >/dev/null 2>&1 && return 0
+    step "Building mpvpaper from source (live wallpapers)..."
+    command -v meson >/dev/null 2>&1 || {
+        warn "meson missing — skip mpvpaper"; return 1; }
+    local build_tmp; build_tmp="$(mktemp -d)"
+    (
+        cd "$build_tmp" || exit 1
+        git clone --depth 1 -q https://github.com/GhostNaN/mpvpaper.git || exit 1
+        cd mpvpaper || exit 1
+        meson setup build --buildtype=release >/dev/null 2>&1 || exit 1
+        ninja -C build >/dev/null 2>&1 || exit 1
+        $SUDO ninja -C build install >/dev/null 2>&1 || exit 1
+    )
+    local rc=$?
+    rm -rf "$build_tmp"
+    if [ $rc -eq 0 ] && command -v mpvpaper >/dev/null 2>&1; then
+        ok "mpvpaper installed"
+        return 0
+    fi
+    warn "mpvpaper build failed — live video wallpapers unavailable"
     return 1
 }
 
@@ -516,8 +575,10 @@ install_deps_debian() {
     step "Updating package lists (apt)..."
     $SUDO apt-get update -qq || true
 
+    # Core runtime packages available in trixie / trixie-backports.
+    # hyprpaper and hyprsunset ship in backports alongside Hyprland on Debian 13.
     local deb_pkgs=(
-        hyprland fish foot swaylock jq wl-clipboard cliphist grim slurp ffmpeg wf-recorder
+        hyprland fish foot hyprpaper hyprsunset swaylock jq wl-clipboard cliphist grim slurp ffmpeg wf-recorder
         wtype brightnessctl ddcutil playerctl wireplumber eza zoxide bat fastfetch python3
         openssl xdg-utils libglib2.0-bin upower util-linux cava curl file git pciutils unzip
         qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-shapes
@@ -530,9 +591,14 @@ install_deps_debian() {
         qt6-wayland-private-dev libdrm-dev libwayland-dev wayland-protocols libwayland-bin
         libxkbcommon-dev libpipewire-0.3-dev spirv-tools libcli11-dev libjemalloc-dev
         libpam0g-dev libpolkit-agent-1-dev libglib2.0-dev libgbm-dev
+        meson scdoc libfontconfig1-dev libfreetype-dev libpixman-1-dev libutf8proc-dev
+        libmpv-dev
     )
 
-    printf '  installing packages via apt...\n'
+    printf '  installing packages via apt (Hyprland stack from backports when available)...\n'
+    local bpo_pkgs=(hyprland hyprpaper hyprsunset hypridle ddcutil)
+    $SUDO apt-get install -y --no-install-recommends \
+        -t trixie-backports "${bpo_pkgs[@]}" 2>/dev/null || true
     $SUDO apt-get install -y --no-install-recommends "${deb_pkgs[@]}" 2>/dev/null || {
         for p in "${deb_pkgs[@]}"; do
             $SUDO apt-get install -y --no-install-recommends "$p" >/dev/null 2>&1 || true
@@ -543,6 +609,7 @@ install_deps_debian() {
     ensure_nerd_font
     ensure_yazi
     ensure_quickshell
+    ensure_mpvpaper
     ensure_bibata_cursor
     ok "dependencies in place for $DISTRO"
 }
@@ -900,9 +967,19 @@ stamp_version() {
 personalize_paths() {
     [ "$HOME" = "/home/ensi" ] && return 0
     local n=0
-    while IFS= read -r f; do
-        sed -i "s|/home/ensi|$HOME|g" "$f" && n=$((n + 1))
-    done < <(grep -rl '/home/ensi' "$CONF" "$HOME/.local/bin" 2>/dev/null)
+    # Limit search to Panacea-owned trees — a full grep of ~/.config can
+    # hang for minutes when large wallpaper packs or .bak trees exist.
+    local roots=(
+        "$CONF/panacea" "$CONF/hypr" "$CONF/foot" "$CONF/fish"
+        "$CONF/fastfetch" "$CONF/nano" "$HOME/.local/bin" "$HOME/.nanorc"
+    )
+    local r f
+    for r in "${roots[@]}"; do
+        [ -e "$r" ] || continue
+        while IFS= read -r f; do
+            sed -i "s|/home/ensi|$HOME|g" "$f" && n=$((n + 1))
+        done < <(grep -rl '/home/ensi' "$r" 2>/dev/null)
+    done
     [ "$n" -gt 0 ] && ok "paths rewritten to $HOME in $n files"
     return 0
 }
@@ -1273,8 +1350,15 @@ if [ "$PRINT_MISSING" = "1" ]; then
         command -v "$bin" >/dev/null 2>&1 || printf '%s\n' "$pkg"
     done
     for row in "${FILE_DEPS[@]}"; do
-        IFS='|' read -r path pkg why <<<"$row"
-        [ -e "$path" ] || printf '%s\n' "$pkg"
+        IFS='|' read -r path alt pkg why <<<"$row"
+        if [ -z "$why" ]; then
+            why="$pkg"; pkg="$alt"; alt=""
+        fi
+        if [ -e "$path" ] || { [ -n "$alt" ] && [ -e "$alt" ]; }; then
+            :
+        else
+            printf '%s\n' "$pkg"
+        fi
     done
     fc-list 2>/dev/null | grep -i "JetBrainsMono.*Nerd" >/dev/null || printf '%s\n' "$FONT_PKG"
     exit 0

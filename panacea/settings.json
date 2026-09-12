@@ -2,7 +2,7 @@
     "animMs": 230,
     "bind_browser": "SUPER + F",
     "bind_closeWindow": "SUPER + Q",
-    "bind_emptyWorkspace": "SUPER + Space",
+    "bind_emptyWorkspace": "",
     "bind_exitHypr": "SUPER + SHIFT + M",
     "bind_fileManager": "SUPER + E",
     "bind_fileManagerTui": "SUPER + SHIFT + E",

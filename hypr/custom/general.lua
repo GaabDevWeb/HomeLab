@@ -1,7 +1,12 @@
 -- Custom General Settings & Overrides (Lua)
 --
 -- API: hl.config({ section = { key = value } })
---
--- Examples:
--- hl.config({ general = { gaps_in = 6, gaps_out = 12 } })
--- hl.config({ decoration = { rounding = 12 } })
+
+-- Teclado padrão: português do Brasil (ABNT2). Sem ru / Alt+Shift.
+hl.config({
+    input = {
+        kb_layout  = "br",
+        kb_variant = "abnt2",
+        kb_options = "",
+    },
+})
