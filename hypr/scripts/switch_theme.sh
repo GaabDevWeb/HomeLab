@@ -110,23 +110,49 @@ hyprpaper_new_format() {
     printf 'splash = false\nipc = on\n'
 } > "$HOME/.config/hypr/hyprpaper.conf"
 
-# setsid: скрипт зовут и из оболочки, и из автозапуска — hyprpaper не должен
-# оставаться на нашем выводе и держать канал открытым после нашего выхода
-pgrep -x hyprpaper >/dev/null || { setsid hyprpaper >/dev/null 2>&1 & sleep 1; }
-hyprctl hyprpaper preload "$WALL" >/dev/null 2>&1
-hyprctl monitors -j | jq -r '.[].name' | while read -r M; do
-    hyprctl hyprpaper wallpaper "$M,$WALL" >/dev/null 2>&1
-done
+# hyprpaper 0.8: preload IPC foi removido; hyprctl sem daemon trava a 100% CPU.
+# Estratégia fiável: reescrever conf + reiniciar o daemon (lê o bloco wallpaper).
+# Fallback IPC com timeout curto se o restart falhar.
+apply_hyprpaper() {
+    # Não usar `pkill -f 'hyprctl hyprpaper'`: mata shells cujo cmdline contém
+    # essa string (ex. wrappers/CI). Só processos hyprctl de verdade.
+    local pid cmd
+    for pid in $(pgrep -x hyprctl 2>/dev/null || true); do
+        cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+        case "$cmd" in
+            *hyprpaper*) kill "$pid" 2>/dev/null || true ;;
+        esac
+    done
+    pkill -x hyprpaper >/dev/null 2>&1 || true
+    sleep 0.2
+    setsid hyprpaper >/dev/null 2>&1 &
+    sleep 0.45
+    if pgrep -x hyprpaper >/dev/null 2>&1; then
+        return 0
+    fi
+    # fallback: IPC (man: wallpaper 'mon, path[, fit_mode]')
+    local m
+    while read -r m; do
+        [ -n "$m" ] || continue
+        timeout 2 hyprctl hyprpaper wallpaper "${m},${WALL},cover" >/dev/null 2>&1 || true
+    done < <(hyprctl monitors -j 2>/dev/null | jq -r '.[].name')
+}
+
+apply_hyprpaper
 
 # --------------------------------------------------------- фон экрана входа
 # Greeter работает от пользователя sddm и в ~/ заглянуть не может: домашний
 # каталог закрыт. Кладём готовую размытую копию в общий каталог, который
 # создал install.sh. Размываем заранее: QML-блюр на greeter'е стоит кадров.
+#
+# Em background: ffmpeg não pode bloquear a troca de wallpaper (senão o
+# Overlay/fade do Panacea fica preso e as janelas “somem”).
 SDDM_DIR=/var/lib/panacea
 if [ -d "$SDDM_DIR" ] && [ -w "$SDDM_DIR" ] && command -v ffmpeg >/dev/null; then
-    # уменьшение до 1280 перед блюром: и быстрее, и размытие мягче
-    ffmpeg -y -loglevel error -i "$WALL" \
-        -vf "scale=1280:-1,gblur=sigma=28,eq=saturation=0.9" \
-        -frames:v 1 "$SDDM_DIR/sddm-bg.jpg" 2>/dev/null \
-        && chmod 644 "$SDDM_DIR/sddm-bg.jpg"
+    (
+        ffmpeg -y -loglevel error -i "$WALL" \
+            -vf "scale=1280:-1,gblur=sigma=28,eq=saturation=0.9" \
+            -frames:v 1 "$SDDM_DIR/sddm-bg.jpg" 2>/dev/null \
+            && chmod 644 "$SDDM_DIR/sddm-bg.jpg"
+    ) >/dev/null 2>&1 &
 fi

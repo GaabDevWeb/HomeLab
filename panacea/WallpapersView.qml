@@ -181,6 +181,7 @@ Item {
         // обратно перед закрытием.
         onRunningChanged: {
             if (running) return;
+            applyWatchdog.stop();
             view.sys.endThemeFade();
             closeAfter.restart();
         }
@@ -191,6 +192,19 @@ Item {
         // скачок, окно исчезает посреди движения
         interval: 560
         onTriggered: view.sys.closeWalls()
+    }
+    // Se switch_theme/ffmpeg/hyprpaper travar, não deixar scrim Overlay eterno
+    Timer {
+        id: applyWatchdog
+        interval: 8000
+        repeat: false
+        onTriggered: {
+            view.sys.endThemeFade();
+            view.sys.closeWalls();
+            view.applying = "";
+            view.flying = "";
+            view.flyingThumb = "";
+        }
     }
     // На каждое открытие встаём на текущие обои: возвращаться к тому месту,
     // где листали в прошлый раз, незачем — глазами ищут «а что стоит сейчас».
@@ -220,6 +234,7 @@ Item {
         view.flying = path;
         // снимок нынешних обоев ДО скрипта: после него на диске уже новый путь
         view.sys.startThemeFade();
+        applyWatchdog.restart();
         pSet.command = view.live
             ? ["bash", Quickshell.env("HOME") + "/.config/hypr/scripts/live_wallpaper.sh",
                "set", path]

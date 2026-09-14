@@ -19,7 +19,7 @@ hl.on("hyprland.start", function ()
 
   hl.exec_cmd("hyprpaper")
   hl.exec_cmd(programs.bar)
-  hl.exec_cmd("wl-paste --type text --watch cliphist store")
+  hl.exec_cmd("wl-paste --type text --watch " .. os.getenv("HOME") .. "/.config/panacea/scripts/clip_store.sh")
   hl.exec_cmd("wl-paste --type image --watch cliphist store")
   -- nm-applet отключён: в системе iwd + systemd-networkd
   -- hl.exec_cmd("nm-applet --indicator")

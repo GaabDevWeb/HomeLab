@@ -1381,10 +1381,16 @@ Item {
                             }
                             Text {
                                 visible: view.sys.cfg.featCalendar
-                                text: view.sys.tr("Календарь")
+                                text: {
+                                    var lab = view.sys.calNextLabel ? view.sys.calNextLabel() : ""
+                                    if (lab.length) return lab
+                                    return view.sys.tr("Календарь")
+                                }
                                 color: clockMa.containsMouse ? view.sys.colOn
                                                             : Qt.rgba(1, 1, 1, 0.28)
                                 font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 5 }
+                                elide: Text.ElideRight
+                                Layout.maximumWidth: 160
                                 Behavior on color { ColorAnimation { duration: 150 } }
                             }
                         }
@@ -1401,9 +1407,9 @@ Item {
 
             }
 
-            // ------------------------------- Wi-Fi · Bluetooth · звук в строчку
-            // Три самых частых переключателя занимали три полосы подряд.
-            // Теперь это одна строка, а громкость правится прямо в плитке.
+            // ------------------------------- Wi-Fi · Homelab · som
+            // Homelab substitui o atalho Bluetooth nesta fila (BT continua
+            // acessível noutros sítios se featBluetooth estiver activo).
             RowLayout {
                 objectName: "cc-toggles"
                 Layout.row: view.ccRow("toggles")
@@ -1411,26 +1417,15 @@ Item {
                 Layout.fillWidth: true
                 spacing: 8
 
-                // Wi-Fi и Bluetooth делят строку поровну. Раньше рядом с ними
-                // стоял ещё и звук, и три плитки в ряд ужимали каждую до
-                // ширины, на которой не помещалось имя сети.
-                // Воткнут кабель — плитка показывает проводную сеть: связь
-                // идёт по нему, и антенна Wi-Fi поверх работающего кабеля
-                // вводила бы в заблуждение. Кабель вынули — плитка сама
-                // возвращается к Wi-Fi. Одинаково на ноутбуке и на ПК: там,
-                // где беспроводного адаптера нет вовсе, она просто всегда
-                // проводная.
+                // Wi-Fi e Homelab partilham a linha. Cabo ligado → tile de rede
+                // cabeada; senão Wi-Fi.
                 MiniTile {
                     Layout.fillWidth: true
                     Layout.preferredWidth: 1
                     Layout.preferredHeight: 56
-                    // Кабель рисуется фигурой, Wi-Fi остаётся знаком шрифта:
-                    // антенна в Nerd Font сделана хорошо, а дерева сети без
-                    // перекладины во всю ширину там просто нет.
                     iconItem: view.sys.wiredOn ? lanShape : null
                     icon: view.sys.wifiOn ? (view.sys.wifiQuality > 66 ? "󰤨"
                                            : view.sys.wifiQuality > 33 ? "󰤥" : "󰤟") : "󰤮"
-                    // подключены — в заголовке имя сети, иначе обычное «Wi-Fi»
                     label: view.sys.wiredOn ? view.sys.tr("Проводная сеть")
                          : (view.sys.wifiOn && view.sys.wifiSsid.length)
                            ? view.sys.wifiSsid : "Wi-Fi"
@@ -1440,14 +1435,8 @@ Item {
                           ? view.sys.wifiQuality + "%"
                           : view.sys.tr("Не подключено"))
                     on: view.sys.wiredOn || view.sys.wifiOn
-                    // Значок кабеля ничего не переключает: проводную сеть
-                    // выключают кабелем, а не кнопкой. Wi-Fi при этом остаётся
-                    // доступен из тела плитки — он мог понадобиться и рядом
-                    // с кабелем.
                     onIconClicked: if (!view.sys.wiredOn) view.sys.toggleWifi()
                     onBodyClicked: {
-                        // страница сетей могла быть отключена установщиком —
-                        // тогда плитка только переключает Wi-Fi
                         if (!view.sys.wifiOn || !view.sys.cfg.featWifi) return;
                         view.sys.openSub("wifi");
                         view.sys.refreshWifiList();
@@ -1459,38 +1448,25 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredWidth: 1
                     Layout.preferredHeight: 56
-                    icon: view.sys.btOn ? "󰂯" : "󰂲"
-                    // подключено устройство — его имя вместо «Bluetooth»
-                    label: (view.sys.btOn && view.sys.btConnectedName.length)
-                           ? view.sys.btConnectedName : "Bluetooth"
-                    sub: !view.sys.btOn ? view.sys.tr("Выключен")
-                       : (view.sys.btConnectedName.length
-                          ? (view.sys.btConnectedBattery >= 0
-                             ? "󰥉 " + view.sys.btConnectedBattery + "%"
-                             : view.sys.tr("Подключено"))
-                          : view.sys.tr("Нет подключений"))
-                    on: view.sys.btOn
-                    // Синий у Bluetooth — примета его собственного значка, но
-                    // на теме Nothing цветного акцента нет вовсе, и одна
-                    // голубая плитка среди чёрно-белых выбивается.
-                    accent: view.sys.themeNothing ? view.sys.colOn : "#0ea5e9"
-                    onIconClicked: view.sys.toggleBt()
-                    onBodyClicked: {
-                        if (!view.sys.btOn || !view.sys.cfg.featBluetooth) return;
-                        view.sys.openSub("bt");
-                        view.sys.scanBt();
+                    // md-server — mesmo glyph do launcher Homelab
+                    icon: String.fromCodePoint(0xF035B)
+                    label: view.sys.tr("Homelab")
+                    sub: {
+                        var h = view.sys.navStatusHub || {}
+                        var n = Number(h.failed_services || 0)
+                        if (!view.sys.navStatusReady) return view.sys.tr("Console")
+                        if (n > 0) return n + " " + view.sys.tr("failed")
+                        return view.sys.tr("SYS · NET · AI")
                     }
+                    on: view.sys.navStatusReady
+                         ? Number((view.sys.navStatusHub || {}).failed_services || 0) === 0
+                         : true
+                    accent: view.sys.colOn
+                    onIconClicked: view.sys.openHomelab()
+                    onBodyClicked: view.sys.openHomelab()
                 }
 
-                // Nothing: звук встаёт третьим в эту же строку, а сеть с
-                // Bluetooth сжимаются и уезжают левее. Место звука в строке
-                // ползунков при этом освобождается — карточка не должна
-                // оказаться в панели дважды.
-                //
-                // Доля та же, что у соседей: строка делится на три равные
-                // части. Раньше звуку отводили меньше, чтобы не обрезать имена
-                // сети и устройства, — но обрезать их приходилось всё равно,
-                // только неровными карточками вместо честного многоточия.
+                // Nothing: som como terceiro tile nesta linha
                 VolCard {
                     visible: view.sys.cfg.featAudio
                     Layout.fillWidth: true
@@ -1926,6 +1902,12 @@ Item {
                     Layout.fillWidth: true
                     Layout.preferredWidth: 1.35
                     Layout.preferredHeight: powerRow.tileH
+                    // Clique → monitor no Control Center (não Homelab)
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: view.sys.togglePage("sysload")
+                    }
                 }
             }
 

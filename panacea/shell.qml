@@ -52,7 +52,7 @@ PanelWindow {
             // узкую полоску у самого края.
             property bool   pillAutoHide: false
             // Режим оверлея: остров парит поверх окон без резервирования полосы
-            property bool   pillOverlay: true
+            property bool   pillOverlay: false
             // Остров виден при раскрытии (панель открывается отдельной плавающей карточкой)
             property bool   pillKeepVisible: false
             // Закрывать оверлей Panacea по Super+Q (иначе убивать фоновое окно)
@@ -290,7 +290,7 @@ PanelWindow {
         fontDisplay: "JetBrainsMono Nerd Font", fontSize: 15, iconSize: 17,
         colFg: "#ffffff", colOn: "#3b82f6", mutedAlpha: 0.45, themeId: "default",
         spacingUnit: 8, smallRadius: 10,
-        pillH: 38, pillPos: "top", pillScreen: "auto", pillAutoHide: false, pillOverlay: true,
+        pillH: 38, pillPos: "top", pillScreen: "auto", pillAutoHide: false, pillOverlay: false,
         pillKeepVisible: false, closePanaceaFirst: true,
         pillDrag: false, panelW: 540,
         monOverrides: "",
@@ -971,12 +971,12 @@ PanelWindow {
             else if (k === "version") root.updCurrent = v;
         }
         if (!done) return;
-        // Уведомление показываем один раз на версию: проверка идёт по таймеру,
-        // и каждые шесть часов напоминать об одном и том же — навязчиво.
-        if (root.updStatus === "behind" && root.updLatest !== root.updNotified) {
-            root.updNotified = root.updLatest;
-            pUpdNotify.running = true;
-        }
+        // Auto-update notifications disabled (fork/local rice — upstream
+        // "behind" alerts are noise). Manual check in Settings still works.
+        // if (root.updStatus === "behind" && root.updLatest !== root.updNotified) {
+        //     root.updNotified = root.updLatest;
+        //     pUpdNotify.running = true;
+        // }
     }
 
     Process {
@@ -1124,10 +1124,11 @@ PanelWindow {
                   Quickshell.env("HOME") + "/.config/panacea"]
     }
 
-    // Первая проверка не на старте: при входе в систему сеть ещё поднимается,
-    // и запрос почти наверняка не прошёл бы.
-    Timer { interval: 45000; running: true; onTriggered: root.checkUpdate() }
-    Timer { interval: 6 * 3600 * 1000; running: true; repeat: true; onTriggered: root.checkUpdate() }
+    // Verificação automática desligada: o rice local diverge do upstream
+    // (EnsixD/Panacea) e a notificação “update available” aparecia sempre.
+    // Em Settings → System ainda dá para “Check” manualmente.
+    // Timer { interval: 45000; running: true; onTriggered: root.checkUpdate() }
+    // Timer { interval: 6 * 3600 * 1000; running: true; repeat: true; onTriggered: root.checkUpdate() }
 
     readonly property string scriptDir:
         Quickshell.env("HOME") + "/.config/panacea/scripts"
@@ -1320,7 +1321,13 @@ PanelWindow {
     property real pillRectW: 0
     property real pillRectH: 0
     readonly property int panelW: cfg.panelW    // ширина раскрытой панели
-    readonly property int gap: 5                // зазор между пилюлей и окнами
+    readonly property int gap: 5                // folga entre menus e janelas
+    // Altura reservada no ecrã = menus superiores (ilha + margem à borda).
+    // notch: colado à borda → só pillH + gap; senão + islandGap.
+    readonly property int reservedEdge: {
+        var edge = root.cfg.notchMode ? 0 : Math.max(0, Number(root.cfg.islandGap) || 0)
+        return root.pillH + edge + root.gap
+    }
     // радиус примыкания к кромке; вне режима выреза примыкать нечему
     readonly property int cornerR: cfg.notchMode ? cfg.notchFlare : 0
 
@@ -1867,10 +1874,74 @@ PanelWindow {
 
     // Gaab Homelab console — mesma forma de Agents: epoch força refresh no view.
     property int homelabEpoch: 0
-    function openHomelab() {
+    // Secção inicial do Homelab (hub|sys|net|…); satélite de status usa deep-link.
+    property string homelabSection: "hub"
+    function openHomelab(section) {
+        root.homelabSection = (section !== undefined && section !== null && String(section).length)
+                              ? String(section) : "hub"
         root.homelabEpoch++;
         togglePage("homelab");
     }
+
+    // Resumo operacional para a micro-barra SYSTEM STATUS (hub leve, ~20s).
+    property var navStatusHub: ({ docker: false, ollama: false, ssh: false, failed_services: 0 })
+    property bool navStatusReady: false
+    Process {
+        id: pNavStatus
+        command: ["bash", root.scriptDir + "/homelab.sh", "hub"]
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    var d = JSON.parse(text)
+                    root.navStatusHub = d
+                    root.navStatusReady = true
+                } catch (e) {}
+            }
+        }
+    }
+    Timer {
+        interval: 20000
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: {
+            pNavStatus.running = false
+            pNavStatus.running = true
+        }
+    }
+    readonly property var navStatusItems: {
+        var hub = root.navStatusHub || {}
+        var ready = root.navStatusReady
+        var netOk = root.wiredOn || root.wifiOn
+        var dockerOk = !!hub.docker
+        var aiOk = !!hub.ollama
+        var svcFail = Number(hub.failed_services || 0) > 0
+
+        function mk(label, ok, unknown, section) {
+            var glyph = unknown ? "—" : (ok ? "●" : "×")
+            var col
+            if (unknown)
+                col = root.colMuted
+            else if (root.themeNothing)
+                col = ok ? root.colFg : root.colCrit
+            else
+                col = ok ? root.colOk : root.colCrit
+            return { label: label, glyph: glyph, color: col, section: section }
+        }
+
+        // SYS: serviços gaab sem falha (estado real do hub); NET: link real
+        return [
+            mk("SYS", !svcFail, !ready, "sys"),
+            mk("NET", netOk, false, "net"),
+            mk("DOCKER", dockerOk, !ready, "docker"),
+            mk("AI", aiOk, !ready, "ai")
+        ]
+    }
+
+    // Satélites visíveis? (espelha NavSatellites.shown — sem duplicar a regra
+    // completa: a própria componente decide; isto só esconde dots internas.)
+    property bool navSatsVisible: false
 
     // ----------------------------------------------------- стоп-кадр экрана
     // Путь к снимку всего экрана, который scripts/shot.sh показывает поверх
@@ -1952,8 +2023,19 @@ PanelWindow {
         if (!m) return;
         root.themeFadeWall = "file://" + String(m[1]).trim();
         root.themeFading = true;
+        // Nunca deixar o fade preso: cobre o ecrã se ficar no Overlay/Bottom
+        themeFadeWatchdog.restart();
     }
-    function endThemeFade() { root.themeFading = false; }
+    function endThemeFade() {
+        root.themeFading = false;
+        themeFadeWatchdog.stop();
+    }
+    Timer {
+        id: themeFadeWatchdog
+        interval: 1800
+        repeat: false
+        onTriggered: root.endThemeFade()
+    }
 
     // ------------------------------------------------------------------ медиа
     // «Липкий» текущий плеер: пока выбранный плеер ещё существует, держимся
@@ -2237,55 +2319,236 @@ PanelWindow {
         pWeatherForecast.running = true;
     }
 
-    // --------------------------------------------------------- нагрузка
-    // Сводка для быстрых настроек на теме Nothing. Минус означает «измерить
-    // не вышло»: строка тогда прячется, а не показывает ноль. Ноль здесь врёт
-    // слишком убедительно — «видеокарта простаивает» и «датчика нет» на глаз
-    // неразличимы.
+    // --------------------------------------------------------- carga + histórico
+    // Uma fonte: metrics_sample.py → LoadCard + Metrics History (+ futuro Bonsai).
+    // Ring em memória (máx. ~30 min @ 5s). Sem SSD.
     property int loadCpu:  -1
     property int loadMem:  -1
     property int loadGpu:  -1
     property int loadTempCpu: -1
     property int loadTempGpu: -1
 
-    // Опрашиваем только пока панель раскрыта и только на той теме, где эта
-    // сводка есть. Постоянный процесс раз в две секунды ради чисел, которых
-    // никто не видит, — плата ни за что: скрипт будит nvidia-smi, а тот
-    // просыпается заметно дольше, чем читается файл.
-    readonly property bool loadWanted: root.expanded
+    property var metricsHistory: []
+    readonly property int metricsMaxSamples: 360   // 30 min @ 5s
+    property string metricsWindow: "15m"           // 5m | 15m | 30m
+
+    function metricsWindowSamples() {
+        if (root.metricsWindow === "5m") return 60
+        if (root.metricsWindow === "30m") return 360
+        return 180  // 15m
+    }
+
+    function metricsSlice() {
+        var n = root.metricsWindowSamples()
+        var h = root.metricsHistory || []
+        if (h.length <= n) return h
+        return h.slice(h.length - n)
+    }
+
+    function pushMetric(sample) {
+        if (!sample || typeof sample !== "object") return
+        var h = (root.metricsHistory || []).slice()
+        h.push(sample)
+        while (h.length > root.metricsMaxSamples)
+            h.shift()
+        root.metricsHistory = h
+
+        function num(v) {
+            if (v === null || v === undefined || v === "") return -1
+            var n = Number(v)
+            return isNaN(n) ? -1 : Math.round(n)
+        }
+        if (sample.cpu_pct !== null && sample.cpu_pct !== undefined)
+            root.loadCpu = num(sample.cpu_pct)
+        if (sample.mem_pct !== null && sample.mem_pct !== undefined)
+            root.loadMem = num(sample.mem_pct)
+        if (sample.gpu_pct !== null && sample.gpu_pct !== undefined)
+            root.loadGpu = num(sample.gpu_pct)
+        if (sample.cpu_temp !== null && sample.cpu_temp !== undefined)
+            root.loadTempCpu = num(sample.cpu_temp)
+        if (sample.gpu_temp !== null && sample.gpu_temp !== undefined)
+            root.loadTempGpu = num(sample.gpu_temp)
+    }
 
     Process {
-        id: pLoad
-        command: ["sh", "-c", Quickshell.env("HOME") + "/.config/panacea/scripts/sysload.sh"]
+        id: pMetrics
+        command: ["python3", Quickshell.env("HOME") + "/.config/panacea/scripts/metrics_sample.py"]
+        running: false
         stdout: StdioCollector {
             onStreamFinished: {
-                // Сборщик копит вывод всех запусков подряд, поэтому берём
-                // последнюю законченную строку, а не начало текста.
-                var recs = String(text).trim().split("\n").filter(r => r.indexOf("|") >= 0);
-                if (!recs.length) return;
-                var a = recs[recs.length - 1].split("|");
-                function num(s) {
-                    s = String(s || "").trim();
-                    return s.length ? (+s) : -1;
-                }
-                root.loadCpu = num(a[0]);
-                root.loadMem = num(a[1]);
-                root.loadGpu = num(a[2]);
-                root.loadTempCpu = num(a[3]);
-                root.loadTempGpu = num(a[4]);
+                try {
+                    var line = String(text).trim().split("\n").filter(function (l) { return l.length > 2 }).pop()
+                    if (!line) return
+                    root.pushMetric(JSON.parse(line))
+                } catch (e) {}
             }
         }
     }
 
     Timer {
-        interval: 2000
-        running: root.loadWanted
+        // sempre ativo (histórico); mais frequente com painel aberto
+        interval: root.expanded ? 2500 : 5000
+        running: true
         repeat: true
         triggeredOnStart: true
-        // Перезапуск через сброс: присваивание running = true, пока процесс
-        // ещё не отметился завершённым, ничего не делает, и показания
-        // замирали бы на первом снимке.
-        onTriggered: { pLoad.running = false; pLoad.running = true; }
+        onTriggered: {
+            if (!pMetrics.running) {
+                pMetrics.running = false
+                pMetrics.running = true
+            }
+        }
+    }
+
+    // --------------------------------------------------------- calendar state
+    // Fonte de verdade partilhada: scripts/calendar.sh → JSON local.
+    // UI / navbar / futuro Bonsai leem daqui (sem segundo store).
+    property var calEvents: []
+    property var calNext: null
+    property var calSummary: ({ events: 0, deadlines: 0, tasks: 0, total: 0, next: null })
+    property var calMarks: ({})          // { "14": {events,deadlines,tasks} }
+    property string calError: ""
+    property int calEpoch: 0             // bump → views refresh
+
+    readonly property string calSh: root.scriptDir + "/calendar.sh"
+
+    function calYmd(d) {
+        var dt = d || new Date()
+        function z(n) { return (n < 10 ? "0" : "") + n }
+        return dt.getFullYear() + "-" + z(dt.getMonth() + 1) + "-" + z(dt.getDate())
+    }
+
+    function calRefresh() {
+        pCalList.running = false
+        pCalList.running = true
+        pCalNext.running = false
+        pCalNext.running = true
+        pCalSum.running = false
+        pCalSum.running = true
+    }
+
+    function calRefreshMonth(year, month0) {
+        function z(n) { return (n < 10 ? "0" : "") + n }
+        var ym = year + "-" + z(month0 + 1)
+        pCalMonth.command = ["bash", root.calSh, "month", ym]
+        pCalMonth.running = false
+        pCalMonth.running = true
+    }
+
+    function calEventsForDay(ymd) {
+        var out = []
+        var list = root.calEvents || []
+        for (var i = 0; i < list.length; i++)
+            if (list[i].date === ymd) out.push(list[i])
+        out.sort(function (a, b) {
+            return String(a.start_time).localeCompare(String(b.start_time))
+        })
+        return out
+    }
+
+    function calCreate(obj) {
+        pCalAct.command = ["bash", root.calSh, "create", JSON.stringify(obj)]
+        pCalAct.running = false
+        pCalAct.running = true
+    }
+
+    function calDelete(id) {
+        pCalAct.command = ["bash", root.calSh, "delete", String(id)]
+        pCalAct.running = false
+        pCalAct.running = true
+    }
+
+    function calNextLabel() {
+        var e = root.calNext
+        if (!e || !e.title) return ""
+        if (e.started) return e.title + " · now"
+        var sec = Number(e.starts_in_sec) || 0
+        if (sec < 60) return e.title + " · " + sec + "s"
+        if (sec < 3600) return e.title + " · " + Math.round(sec / 60) + "m"
+        return e.start_time + " · " + e.title
+    }
+
+    Process {
+        id: pCalList
+        command: ["bash", root.calSh, "list"]
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    var d = JSON.parse(text)
+                    root.calEvents = d.events || []
+                    root.calError = d.ok === false ? (d.error || "error") : ""
+                    root.calEpoch++
+                } catch (e) { root.calError = "parse" }
+            }
+        }
+    }
+    Process {
+        id: pCalNext
+        command: ["bash", root.calSh, "next"]
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    var d = JSON.parse(text)
+                    root.calNext = d.event || null
+                    root.calEpoch++
+                } catch (e) {}
+            }
+        }
+    }
+    Process {
+        id: pCalSum
+        command: ["bash", root.calSh, "summary"]
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    var d = JSON.parse(text)
+                    root.calSummary = {
+                        events: d.events || 0,
+                        deadlines: d.deadlines || 0,
+                        tasks: d.tasks || 0,
+                        total: d.total || 0,
+                        next: d.next || null
+                    }
+                } catch (e) {}
+            }
+        }
+    }
+    Process {
+        id: pCalMonth
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    var d = JSON.parse(text)
+                    root.calMarks = d.marks || {}
+                    root.calEpoch++
+                } catch (e) {}
+            }
+        }
+    }
+    Process {
+        id: pCalAct
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    var d = JSON.parse(text)
+                    if (d.ok === false) root.calError = d.error || "save_failed"
+                    else root.calError = ""
+                } catch (e) { root.calError = "save_failed" }
+                root.calRefresh()
+            }
+        }
+    }
+
+    Timer {
+        interval: 30000
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: root.calRefresh()
     }
 
     // ------------------------------------------------------------- яркость
@@ -3860,6 +4123,7 @@ PanelWindow {
         }
         function shortcuts(): void { root.toggleKeysWindow(); }
         function clipboard(): void { root.togglePage("clip"); }
+        function bonsai(): void { root.togglePage("bonsai"); }
         function powermenu(): void { root.togglePage("power"); }
         function weather(): void { root.openWeatherDetails(); }
         function smartClose(): string {
@@ -3883,7 +4147,8 @@ PanelWindow {
         function shotCopied(path: string): void { root.shotCopied(path); }
         function notifications(): void { root.togglePage("notif"); }
         function audio(): void { root.togglePage("audio"); }
-        function calendar(): void { root.togglePage("cal"); }
+        function calendar(): void { root.togglePage("cal"); root.calRefresh(); }
+        function calRefresh(): void { root.calRefresh(); }
         function theme(): void { root.toggleWalls(); }
         function record(): void { root.togglePage("record"); }
         function files(): void { root.togglePage("files"); }
@@ -3973,9 +4238,9 @@ PanelWindow {
     // окно тоже должно задать само
     implicitWidth: root.screen ? root.screen.width : 1920
     color: "transparent"
-    // зазор между пилюлей и окнами (0 в режиме оверлея или при скрытии)
+    // Espaço sob os menus superiores (ilha + satélites). Overlay=0 desliga a reserva.
     exclusiveZone: (root.cfg.pillOverlay || root.pillHidden || (root.fullscreenActive && !root.expanded))
-                   ? 0 : pillH + gap
+                   ? 0 : root.reservedEdge
     WlrLayershell.layer: WlrLayer.Overlay
     // Пока поверх экрана развёрнутое окно, пилюли не видно совсем.
     // Показываем её обратно, если панель раскрыли клавишами или если
@@ -4055,6 +4320,14 @@ PanelWindow {
             item: (root.cfg.pillKeepVisible && !root.settingsMode && (root.expanded || detachedPanel.opacity > 0.005)) ? detachedPanel : null
             intersection: Intersection.Combine
         }
+        Region {
+            item: (navSats.visible && navSats.workspacePill) ? navSats.workspacePill : null
+            intersection: Intersection.Combine
+        }
+        Region {
+            item: (navSats.visible && navSats.statusPill) ? navSats.statusPill : null
+            intersection: Intersection.Combine
+        }
     }
     mask: root.holdOpen ? null : capsuleRegion
     // Лаунчер забирает клавиатуру сразу (Exclusive), чтобы можно было
@@ -4088,27 +4361,8 @@ PanelWindow {
         }
     }
 
-    // Снимок прежних обоев: лежит ниже пилюли и выше рабочего стола,
-    // клики не ловит — маска окна всё равно пропускает их насквозь.
-    Image {
-        anchors.fill: parent
-        z: -5
-        // Пока кроссфейда нет, снимок не нужен и в памяти его быть не должно:
-        // распакованные обои во весь экран — это десяток мегабайт, которые
-        // висели круглые сутки ради семисот миллисекунд перехода.
-        source: (root.themeFading || opacity > 0.01) ? root.themeFadeWall : ""
-        fillMode: Image.PreserveAspectCrop
-        // у обоев бывает 75 мегапикселей: без ограничения Qt отказывается их
-        // декодировать (лимит 256 МБ на картинку) и кроссфейд не появлялся
-        sourceSize.width: root.screen ? root.screen.width : 1920
-        asynchronous: false
-        cache: false
-        visible: opacity > 0.01
-        opacity: root.themeFading ? 1 : 0
-        Behavior on opacity {
-            NumberAnimation { duration: 700; easing.type: Easing.InOutCubic }
-        }
-    }
+    // (crossfade de wallpaper vive num PanelWindow Bottom — ver themeFadeWin)
+
 
     // Подсветка кромки, к которой прицепится остров. Пока тянут по пустоте,
     // ничего не горит — значит отпускать некуда, вернётся на место.
@@ -5446,8 +5700,11 @@ PanelWindow {
                 // открытии четвёртого стола весь остров переставлялся. Пока
                 // столов не больше пяти, теперь не меняется ничего.
                 Item {
-                    Layout.preferredWidth: Math.max(wsRow.implicitWidth,
-                                                    nothingCapsule.wsReserve)
+                    // Dots mudam para o satélite WORKSPACE — evita duplicar.
+                    visible: !root.navSatsVisible
+                    Layout.preferredWidth: visible
+                        ? Math.max(wsRow.implicitWidth, nothingCapsule.wsReserve)
+                        : 0
                     Layout.preferredHeight: 6
                     Layout.alignment: Qt.AlignVCenter
 
@@ -5978,6 +6235,8 @@ PanelWindow {
                            : root.page === "power"    ? powerComp
                            : root.page === "notif"    ? notifComp
                            : root.page === "audio"    ? audioComp
+                           : root.page === "sysload"  ? sysLoadComp
+                           : root.page === "bonsai"   ? bonsaiComp
                            : root.page === "cal"      ? calComp
                            : root.page === "record"   ? recordComp
                            : root.page === "files"    ? filesComp
@@ -5997,6 +6256,8 @@ PanelWindow {
         Component { id: powerComp;    PowerView { sys: root } }
         Component { id: notifComp;    NotificationsView { sys: root } }
         Component { id: audioComp;    AudioView { sys: root } }
+        Component { id: sysLoadComp;  SysLoadView { sys: root } }
+        Component { id: bonsaiComp;   BonsaiView { sys: root } }
         Component { id: calComp;      CalendarView { sys: root } }
         Component { id: recordComp;   RecordView { sys: root } }
         Component { id: filesComp;    FilesView { sys: root } }
@@ -6006,6 +6267,17 @@ PanelWindow {
         Component { id: vaultSaveComp; VaultSaveView { sys: root } }
         Component { id: agentsComp;    AgentsView { sys: root } }
         Component { id: homelabComp;   HomelabView { sys: root } }
+    }
+
+    // WORKSPACE + SYSTEM STATUS — satélites da ilha (mesmo DNA visual)
+    NavSatellites {
+        id: navSats
+        anchors.fill: parent
+        z: 55
+        sys: root
+        capsuleItem: capsule
+        onShownChanged: root.navSatsVisible = shown
+        Component.onCompleted: root.navSatsVisible = shown
     }
 
     // ------------------------------------------------ отдельная плавающая панель
@@ -6445,6 +6717,32 @@ PanelWindow {
         opacity: root.weatherDetailsOpen ? 1 : 0
         Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutBack } }
         Behavior on opacity { NumberAnimation { duration: 140 } }
+    }
+}
+
+// Crossfade de wallpaper: TEM de ficar ABAIXO das janelas (Bottom).
+// Antes vivia no Overlay da ilha — cobria todos os apps enquanto themeFading
+// estivesse true (e ficava preso se o script de wallpaper demorasse/falhasse).
+PanelWindow {
+    id: themeFadeWin
+    // Só enquanto o fade está activo — não deixar surface Bottom tapar o hyprpaper
+    visible: root.themeFading
+    screen: root.screen
+    anchors { top: true; bottom: true; left: true; right: true }
+    color: "transparent"
+    exclusionMode: ExclusionMode.Ignore
+    WlrLayershell.layer: WlrLayer.Bottom
+    WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
+
+    Image {
+        id: themeFadeImg
+        anchors.fill: parent
+        source: root.themeFading ? root.themeFadeWall : ""
+        fillMode: Image.PreserveAspectCrop
+        sourceSize.width: root.screen ? root.screen.width : 1920
+        asynchronous: false
+        cache: false
+        opacity: 1
     }
 }
 

@@ -7,6 +7,9 @@ pcall(function()
     -- Homelab console
     hl.bind("SUPER + SHIFT + H", hl.dsp.exec_cmd(QS .. "homelab"), { description = "Homelab console" })
 
+    -- Bonsai agent status (stub até o agent core existir)
+    hl.bind("SUPER + SHIFT + O", hl.dsp.exec_cmd(QS .. "bonsai"), { description = "Bonsai status" })
+
     -- Restart rice: Hyprland config + pill (same sequence as update.sh, without theme restore)
     hl.bind("SUPER + SHIFT + R", hl.dsp.exec_cmd(
         "bash -c 'hyprctl reload >/dev/null 2>&1; (pkill -x qs >/dev/null 2>&1; sleep 1; exec env QSG_RENDER_LOOP=threaded qs -c \""

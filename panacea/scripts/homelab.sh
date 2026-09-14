@@ -50,7 +50,7 @@ sections = [
     {"id": "sys", "label": "SYS", "ok": True, "hint": f"load {load} · mem {mem}%"},
     {"id": "net", "label": "NET", "ok": True, "hint": "network"},
     {"id": "dev", "label": "DEV", "ok": True, "hint": "projects"},
-    {"id": "run", "label": "RUN", "ok": int(failed) == 0, "hint": f"{failed} failed" if int(failed) else "services"},
+    {"id": "run", "label": "BACKGROUND", "ok": int(failed) == 0, "hint": f"{failed} failed" if int(failed) else "terminals"},
     {"id": "logs", "label": "LOGS", "ok": True, "hint": "journal"},
     {"id": "docker", "label": "DOCKER", "ok": bool(docker_ok), "hint": "online" if docker_ok else "offline"},
     {"id": "ai", "label": "AI", "ok": bool(ollama_ok), "hint": "ollama" if ollama_ok else "offline"},
@@ -95,6 +95,80 @@ if os.path.exists("/etc/os-release"):
 vram = sh("rocm-smi --showmeminfo vram 2>/dev/null | awk '/Total Memory/{print $NF; exit}'") \
     or sh("nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1") \
     or ""
+
+# mem bytes + loadavg + freq (reais)
+mem_total = mem_avail = mem_used = swap_total = swap_free = 0
+try:
+    kv = {}
+    for line in open("/proc/meminfo"):
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].endswith(":"):
+            kv[parts[0][:-1]] = int(parts[1])  # kB
+    mem_total = kv.get("MemTotal", 0) * 1024
+    mem_avail = kv.get("MemAvailable", 0) * 1024
+    mem_used = max(0, mem_total - mem_avail)
+    swap_total = kv.get("SwapTotal", 0) * 1024
+    swap_free = kv.get("SwapFree", 0) * 1024
+except Exception:
+    pass
+
+loadavg = []
+try:
+    loadavg = [float(x) for x in open("/proc/loadavg").read().split()[:3]]
+except Exception:
+    loadavg = []
+
+freq_mhz = 0
+try:
+    # média das CPUs online
+    freqs = []
+    for root, dirs, files in os.walk("/sys/devices/system/cpu"):
+        if root.count("/") > 7:
+            dirs.clear()
+            continue
+        base = os.path.basename(root)
+        if not base.startswith("cpu") or not base[3:].isdigit():
+            continue
+        p = os.path.join(root, "cpufreq", "scaling_cur_freq")
+        if os.path.isfile(p):
+            freqs.append(int(open(p).read().strip()) / 1000.0)
+    if freqs:
+        freq_mhz = round(sum(freqs) / len(freqs))
+except Exception:
+    pass
+
+# top processes (one ps snapshot; exclude collector noise)
+procs = []
+me = os.getpid()
+try:
+    raw = subprocess.check_output(
+        ["ps", "-eo", "pid=,comm=,%cpu=,%mem=,rss=", "--sort=-%cpu"],
+        text=True, stderr=subprocess.DEVNULL, timeout=3,
+    )
+except Exception:
+    raw = ""
+skip = {"ps", "homelab.sh"}
+for line in (raw.splitlines() if raw else []):
+    parts = line.split()
+    if len(parts) < 5:
+        continue
+    try:
+        pid = int(parts[0])
+        name = parts[1][:28]
+        if pid == me or name in skip:
+            continue
+        procs.append({
+            "pid": pid,
+            "name": name,
+            "cpu": float(parts[2]),
+            "mem": float(parts[3]),
+            "rss_kb": int(parts[4]),
+        })
+    except Exception:
+        continue
+    if len(procs) >= 12:
+        break
+
 print(json.dumps({
     "cpu_pct": float(cpu or 0),
     "mem_pct": float(mem or 0),
@@ -106,13 +180,21 @@ print(json.dumps({
     "kernel": kernel,
     "hostname": host,
     "os": osname,
+    "mem_total": mem_total,
+    "mem_used": mem_used,
+    "mem_avail": mem_avail,
+    "swap_total": swap_total,
+    "swap_used": max(0, swap_total - swap_free),
+    "loadavg": loadavg,
+    "cpu_freq_mhz": freq_mhz,
+    "processes": procs,
 }))
 PY
 }
 
 cmd_net() {
   python3 - <<'PY'
-import json, subprocess, shutil
+import json, subprocess, os, time
 
 def sh(c):
     try:
@@ -122,19 +204,63 @@ def sh(c):
 
 iface = sh("ip -br route show default 2>/dev/null | awk '{print $5; exit}'")
 ip = sh(f"ip -4 -br addr show {iface} 2>/dev/null | awk '{{print $3}}'") if iface else ""
+ip6 = sh(f"ip -6 -br addr show {iface} 2>/dev/null | awk '{{print $3}}'") if iface else ""
 gw = sh("ip -br route show default 2>/dev/null | awk '{print $3; exit}'")
 dns = sh("resolvectl dns 2>/dev/null | awk 'NR==1{print $2; exit}'") or sh("grep ^nameserver /etc/resolv.conf | awk '{print $2; exit}'")
+state = ""
+speed = ""
+oper = ""
+if iface:
+    try:
+        state = open(f"/sys/class/net/{iface}/operstate").read().strip()
+    except Exception:
+        state = ""
+    try:
+        speed = open(f"/sys/class/net/{iface}/speed").read().strip()
+        if speed and speed != "-1":
+            speed = f"{speed} Mb/s"
+        else:
+            speed = "N/A"
+    except Exception:
+        speed = "N/A"
+    try:
+        oper = open(f"/sys/class/net/{iface}/carrier").read().strip()
+        oper = "up" if oper == "1" else "down"
+    except Exception:
+        oper = state or "N/A"
+
 rx = sh(f"cat /sys/class/net/{iface}/statistics/rx_bytes 2>/dev/null") if iface else "0"
 tx = sh(f"cat /sys/class/net/{iface}/statistics/tx_bytes 2>/dev/null") if iface else "0"
+
+# taxa aproximada com amostra curta (não agressiva)
+rx_rate = tx_rate = 0
+try:
+    r1, t1 = int(rx or 0), int(tx or 0)
+    time.sleep(0.35)
+    r2 = int(open(f"/sys/class/net/{iface}/statistics/rx_bytes").read())
+    t2 = int(open(f"/sys/class/net/{iface}/statistics/tx_bytes").read())
+    dt = 0.35
+    rx_rate = max(0, int((r2 - r1) / dt))
+    tx_rate = max(0, int((t2 - t1) / dt))
+    rx, tx = str(r2), str(t2)
+except Exception:
+    pass
+
 ping = sh("ping -c1 -W1 1.1.1.1 >/dev/null 2>&1 && echo ok || echo fail")
 ssh = sh("systemctl is-active ssh 2>/dev/null || systemctl is-active sshd 2>/dev/null")
 print(json.dumps({
     "iface": iface,
     "ip": ip,
+    "ip6": ip6,
     "gateway": gw,
     "dns": dns,
+    "state": state or "N/A",
+    "link": oper or "N/A",
+    "speed": speed or "N/A",
     "rx_bytes": int(rx or 0),
     "tx_bytes": int(tx or 0),
+    "rx_rate": rx_rate,
+    "tx_rate": tx_rate,
     "internet": ping == "ok",
     "ssh": ssh == "active",
     "dns_ok": bool(dns),
@@ -144,7 +270,7 @@ PY
 
 cmd_storage() {
   python3 - <<'PY'
-import json, subprocess
+import json, subprocess, time, os
 
 def sh(c):
     try:
@@ -153,7 +279,6 @@ def sh(c):
         return ""
 
 def df_line(path):
-    # size used avail pct
     o = sh(f"df -P {path} | awk 'NR==2{{print $2,$3,$4,$5,$6}}'")
     if not o: return None
     a = o.split()
@@ -173,11 +298,55 @@ smart = sh("sudo -n smartctl -H /dev/nvme0n1 2>/dev/null | awk -F: '/overall-hea
      or sh("smartctl -H /dev/nvme0n1 2>/dev/null | awk -F: '/overall-health|SMART overall/{print $2}'") \
      or "unknown"
 
+# I/O rate via /proc/diskstats (amostra curta, dispositivo principal)
+def diskstats():
+    out = {}
+    try:
+        for line in open("/proc/diskstats"):
+            p = line.split()
+            if len(p) < 14:
+                continue
+            name = p[2]
+            # só discos de topo (nvme0n1, sda) — sem partições
+            if name.startswith("loop") or name.startswith("dm-"):
+                continue
+            if name[-1].isdigit() and not name.startswith("nvme"):
+                continue
+            if "p" in name and name.startswith("nvme"):
+                continue
+            # sectors read/written (512B)
+            out[name] = (int(p[5]), int(p[9]))
+    except Exception:
+        pass
+    return out
+
+read_bps = write_bps = 0
+io_dev = ""
+try:
+    a = diskstats()
+    time.sleep(0.35)
+    b = diskstats()
+    best = 0
+    for name, (r2, w2) in b.items():
+        if name not in a:
+            continue
+        r1, w1 = a[name]
+        rd = max(0, (r2 - r1) * 512 / 0.35)
+        wr = max(0, (w2 - w1) * 512 / 0.35)
+        if rd + wr >= best:
+            best = rd + wr
+            read_bps, write_bps, io_dev = int(rd), int(wr), name
+except Exception:
+    pass
+
 print(json.dumps({
     "root": df_line("/"),
     "srv": df_line("/srv"),
     "disks": disks,
     "health": smart.strip() if smart else "unknown",
+    "io_dev": io_dev or "N/A",
+    "read_bps": read_bps,
+    "write_bps": write_bps,
 }))
 PY
 }
@@ -333,25 +502,87 @@ unit_name() {
 
 cmd_services_list() {
   python3 - "$SVC_DIR" "$UNIT_DIR" <<'PY'
-import json, os, subprocess, sys
+import json, os, subprocess, sys, re, time
 svc_dir, unit_dir = sys.argv[1:3]
 items = []
 
 def user_prop(unit, prop):
     try:
-        return subprocess.check_output(["systemctl", "--user", "show", unit, f"-p{prop}", "--value"], text=True, stderr=subprocess.DEVNULL).strip()
+        return subprocess.check_output(
+            ["systemctl", "--user", "show", unit, f"-p{prop}", "--value"],
+            text=True, stderr=subprocess.DEVNULL
+        ).strip()
     except Exception:
         return ""
+
+def last_log(unit):
+    try:
+        out = subprocess.check_output(
+            ["journalctl", "--user", "-u", unit, "-n", "1", "-o", "cat", "--no-pager"],
+            text=True, stderr=subprocess.DEVNULL
+        ).strip()
+        # keep one short line
+        line = out.splitlines()[-1] if out else ""
+        return line[:160]
+    except Exception:
+        return ""
+
+def fmt_uptime(active_enter_usec, active_enter_ts=""):
+    # Prefer USec when available; fall back to ActiveEnterTimestamp text.
+    try:
+        usec = int(active_enter_usec or 0)
+        if usec > 0:
+            started = usec / 1_000_000.0
+        elif active_enter_ts and active_enter_ts.lower() not in ("", "n/a"):
+            # e.g. "Sat 2026-09-12 20:32:04 -03" — %z does not accept -03
+            import datetime as _dt
+            m = re.search(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", active_enter_ts)
+            if not m:
+                return ""
+            started = _dt.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+        else:
+            return ""
+        secs = max(0, int(time.time() - started))
+        d, rem = divmod(secs, 86400)
+        h, rem = divmod(rem, 3600)
+        m, s = divmod(rem, 60)
+        if d > 0:
+            return f"{d}d {h:02d}:{m:02d}:{s:02d}"
+        return f"{h:02d}:{m:02d}:{s:02d}"
+    except Exception:
+        return ""
+
+def status_of(state, sub):
+    st = (state or "").lower()
+    su = (sub or "").lower()
+    if st == "active" and su == "running":
+        return "RUNNING"
+    if st == "active" and su == "exited":
+        # oneshot finished — not a live process
+        return "STOPPED"
+    if st == "activating":
+        return "STARTING"
+    if st == "deactivating":
+        return "STOPPING"
+    if st == "failed" or su == "failed":
+        return "FAILED"
+    if st == "reloading" or "auto-restart" in su or su == "auto-restart":
+        return "RESTARTING"
+    if st in ("inactive", "dead") or su == "dead":
+        return "STOPPED"
+    return "UNKNOWN"
 
 for fn in sorted(os.listdir(svc_dir)) if os.path.isdir(svc_dir) else []:
     if not fn.endswith((".yaml", ".yml", ".json")):
         continue
     path = os.path.join(svc_dir, fn)
     name = os.path.splitext(fn)[0]
-    meta = {"name": name, "directory": "", "command": "", "port": "", "persistent": True, "restart": "on-failure"}
+    meta = {
+        "name": name, "directory": "", "command": "", "port": "",
+        "persistent": True, "restart": "on-failure",
+    }
     try:
-        raw = open(path).read()
-        # minimal yaml: key: value lines
+        raw = open(path, encoding="utf-8").read()
         for line in raw.splitlines():
             if ":" not in line or line.strip().startswith("#"):
                 continue
@@ -360,30 +591,39 @@ for fn in sorted(os.listdir(svc_dir)) if os.path.isdir(svc_dir) else []:
             if k in meta:
                 if k == "persistent":
                     meta[k] = v.lower() in ("1", "true", "yes")
-                elif k == "port" and v.isdigit():
+                elif k == "port" and str(v).isdigit():
                     meta[k] = int(v)
                 else:
                     meta[k] = v
     except Exception:
         pass
-    unit = f"gaab-{name.lower().replace(' ', '-')}.service"
-    # normalize unit from filename
-    import re
-    slug = re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')
+
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     unit = f"gaab-{slug}.service"
     state = user_prop(unit, "ActiveState") or "inactive"
     sub = user_prop(unit, "SubState")
     pid = user_prop(unit, "MainPID")
+    nrestarts = user_prop(unit, "NRestarts")
+    result = user_prop(unit, "Result")
+    enter_usec = user_prop(unit, "ActiveEnterTimestampUSec")
+    enter_ts = user_prop(unit, "ActiveEnterTimestamp")
+    status = status_of(state, sub)
+    running = status == "RUNNING"
     items.append({
         **meta,
         "unit": unit,
         "state": state,
         "sub_state": sub,
+        "status": status,
         "pid": int(pid) if pid.isdigit() else 0,
-        "running": state == "active",
+        "restarts": int(nrestarts) if nrestarts.isdigit() else 0,
+        "last_exit": result or "",
+        "uptime": fmt_uptime(enter_usec, enter_ts) if running else "",
+        "last_log": last_log(unit) if (running or status == "FAILED") else "",
+        "running": running,
         "defined": os.path.exists(os.path.join(unit_dir, unit)),
     })
-print(json.dumps({"services": items}))
+print(json.dumps({"services": items, "label": "BACKGROUND"}))
 PY
 }
 

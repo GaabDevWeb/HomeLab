@@ -29,6 +29,8 @@ B("pillShortcuts",mainMod .. " + slash",         hl.dsp.exec_cmd(QS .. "shortcut
 B("pillWifi",     mainMod .. " + SHIFT + W",     hl.dsp.exec_cmd(QS .. "wifi"))
 B("pillBt",       mainMod .. " + SHIFT + B",     hl.dsp.exec_cmd(QS .. "bluetooth"))
 B("pillClip",     mainMod .. " + V",             hl.dsp.exec_cmd(QS .. "clipboard"))
+-- SUPER+C: mesmo Clipboard History (pedido Homelab rice). SUPER+V mantém-se.
+hl.bind(mainMod .. " + C", hl.dsp.exec_cmd(QS .. "clipboard"), { description = "Clipboard history" })
 B("pillPower",    "CTRL + ALT + delete",         hl.dsp.exec_cmd(QS .. "powermenu"))
 B("pillNotif",    mainMod .. " + SHIFT + N",     hl.dsp.exec_cmd(QS .. "notifications"))
 B("pillRecord",   mainMod .. " + P",             hl.dsp.exec_cmd(QS .. "record"))

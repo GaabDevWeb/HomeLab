@@ -1,0 +1,34 @@
+{
+  "presets": [
+    {
+      "id": "volume_boost",
+      "label": "VOLUME BOOST",
+      "ee": "volume_boost",
+      "desc": "Perceived loudness via EQ + modest output gain"
+    },
+    {
+      "id": "quality",
+      "label": "QUALITY",
+      "ee": "quality",
+      "desc": "Balanced clarity for general / music"
+    },
+    {
+      "id": "bass",
+      "label": "BASS",
+      "ee": "bass",
+      "desc": "Low-end emphasis"
+    },
+    {
+      "id": "detail",
+      "label": "DETAIL",
+      "ee": "detail",
+      "desc": "Presence / separation for IEMs"
+    },
+    {
+      "id": "gaming",
+      "label": "GAMING",
+      "ee": "gaming",
+      "desc": "Footsteps and voice clarity"
+    }
+  ]
+}

@@ -21,10 +21,28 @@ Item {
     property string formDir: ""
     property string formCmd: ""
     property string formPort: ""
+    // SYS process list: "cpu" | "mem"
+    property string procSort: "cpu"
+    property int procDetailPid: 0
+    readonly property var procList: {
+        // force rebind when sort/payload change
+        var _s = view.procSort
+        var _p = view.payload
+        return view.sortedProcesses()
+    }
 
     implicitHeight: col.implicitHeight
 
     readonly property string sh: view.sys.scriptDir + "/homelab.sh"
+
+    // Background-terminal surface tokens (Panacea-native, not a new palette)
+    readonly property int termRadius: 14
+    readonly property int termPadX: 16
+    readonly property int termPadY: 14
+    readonly property int termGap: 10
+    readonly property int termInnerGap: 6
+    readonly property int termAccentW: 3
+    readonly property int termLogPreviewMax: 1
 
     function goBack() {
         if (view.creating) { view.creating = false; return true }
@@ -40,14 +58,14 @@ Item {
             pHub.running = true
             return
         }
-        var cmd = ["sh", view.sh, "sys"]
-        if (view.section === "net") cmd = ["sh", view.sh, "net"]
-        else if (view.section === "storage") cmd = ["sh", view.sh, "storage"]
-        else if (view.section === "docker") cmd = ["sh", view.sh, "docker"]
-        else if (view.section === "ai") cmd = ["sh", view.sh, "ai"]
-        else if (view.section === "dev") cmd = ["sh", view.sh, "projects"]
-        else if (view.section === "run") cmd = ["sh", view.sh, "services"]
-        else if (view.section === "logs") cmd = ["sh", view.sh, "logs", view.detail || "system"]
+        var cmd = ["bash", view.sh, "sys"]
+        if (view.section === "net") cmd = ["bash", view.sh, "net"]
+        else if (view.section === "storage") cmd = ["bash", view.sh, "storage"]
+        else if (view.section === "docker") cmd = ["bash", view.sh, "docker"]
+        else if (view.section === "ai") cmd = ["bash", view.sh, "ai"]
+        else if (view.section === "dev") cmd = ["bash", view.sh, "projects"]
+        else if (view.section === "run") cmd = ["bash", view.sh, "services"]
+        else if (view.section === "logs") cmd = ["bash", view.sh, "logs", view.detail || "system"]
         pSec.command = cmd
         pSec.running = false
         pSec.running = true
@@ -62,7 +80,7 @@ Item {
     }
 
     function runAction(argv) {
-        pAct.command = ["sh", view.sh].concat(argv)
+        pAct.command = ["bash", view.sh].concat(argv)
         pAct.running = false
         pAct.running = true
     }
@@ -74,7 +92,7 @@ Item {
 
     Process {
         id: pHub
-        command: ["sh", view.sh, "hub"]
+        command: ["bash", view.sh, "hub"]
         running: true
         stdout: StdioCollector {
             onStreamFinished: {
@@ -85,7 +103,7 @@ Item {
     }
     Process {
         id: pSec
-        command: ["sh", view.sh, "sys"]
+        command: ["bash", view.sh, "sys"]
         running: false
         stdout: StdioCollector {
             onStreamFinished: {
@@ -113,12 +131,49 @@ Item {
 
     Connections {
         target: view.sys
-        function onHomelabEpochChanged() { view.section = "hub"; view.detail = ""; view.refresh() }
+        function onHomelabEpochChanged() {
+            var s = view.sys.homelabSection || "hub"
+            view.section = s
+            view.detail = ""
+            view.creating = false
+            view.logLines = []
+            view.refresh()
+        }
     }
 
     Timer {
-        interval: 15000; repeat: true; running: true
-        onTriggered: if (view.section === "hub" || view.section === "sys") view.refresh()
+        interval: view.section === "run" ? 8000 : 15000
+        repeat: true
+        running: true
+        onTriggered: if (view.section === "hub" || view.section === "sys" || view.section === "run") view.refresh()
+    }
+
+    function statusGlyph(st) {
+        var s = String(st || "").toUpperCase()
+        if (s === "RUNNING") return "●"
+        if (s === "FAILED") return "×"
+        if (s === "STARTING" || s === "RESTARTING" || s === "STOPPING") return "◌"
+        return "○"
+    }
+    function statusColorOf(st) {
+        var s = String(st || "").toUpperCase()
+        if (s === "RUNNING") return view.sys.colOk
+        if (s === "FAILED") return view.sys.colCrit
+        if (s === "STARTING" || s === "RESTARTING" || s === "STOPPING") return view.sys.colWarn
+        return view.sys.colMuted
+    }
+    function selectedService() {
+        var list = view.payload.services || []
+        for (var i = 0; i < list.length; i++)
+            if (list[i].name === view.detail) return list[i]
+        return null
+    }
+    function sectionTitle() {
+        if (view.creating) return view.sys.tr("NEW SERVICE")
+        if (view.detail !== "") return view.detail.toUpperCase()
+        if (view.section === "hub") return view.sys.tr("HOMELAB")
+        if (view.section === "run") return view.sys.tr("BACKGROUND")
+        return view.section.toUpperCase()
     }
 
     function pctBar(pct) {
@@ -134,6 +189,20 @@ Item {
         if (n > 1e6) return (n / 1e6).toFixed(1) + " MB"
         if (n > 1e3) return (n / 1e3).toFixed(0) + " KB"
         return n + " B"
+    }
+    function sortedProcesses() {
+        var list = (view.payload.processes || []).slice()
+        var key = view.procSort === "mem" ? "rss_kb" : "cpu"
+        list.sort(function (a, b) {
+            return (Number(b[key]) || 0) - (Number(a[key]) || 0)
+        })
+        return list
+    }
+    function processByPid(pid) {
+        var list = view.payload.processes || []
+        for (var i = 0; i < list.length; i++)
+            if (Number(list[i].pid) === Number(pid)) return list[i]
+        return null
     }
 
     ColumnLayout {
@@ -159,9 +228,7 @@ Item {
             }
             Text {
                 Layout.fillWidth: true
-                text: view.creating ? view.sys.tr("NEW SERVICE")
-                    : (view.detail !== "" ? view.detail.toUpperCase()
-                    : (view.section === "hub" ? view.sys.tr("HOMELAB") : view.section.toUpperCase()))
+                text: view.sectionTitle()
                 color: view.sys.colFg
                 font { family: view.sys.fontBody; pixelSize: view.sys.fontSize; letterSpacing: 1.2 }
             }
@@ -205,7 +272,7 @@ Item {
                     RowLayout {
                         anchors.fill: parent
                         anchors.margins: 12
-                        spacing: 10
+                        spacing: 16
                         Text {
                             text: "●"
                             color: view.statusColor(modelData.ok)
@@ -215,10 +282,13 @@ Item {
                             text: modelData.label
                             color: view.sys.colFg
                             font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 1; letterSpacing: 1 }
-                            Layout.preferredWidth: 72
+                            // Coluna larga o bastante para BACKGROUND (antes 72 colidia com o hint)
+                            Layout.preferredWidth: 128
+                            Layout.minimumWidth: 128
                         }
                         Text {
                             Layout.fillWidth: true
+                            Layout.leftMargin: 4
                             text: modelData.hint || ""
                             color: view.sys.colMuted
                             elide: Text.ElideRight
@@ -241,6 +311,7 @@ Item {
             Layout.fillWidth: true
             spacing: 8
             visible: view.section === "sys"
+
             Repeater {
                 model: [
                     { k: "CPU", v: (view.payload.cpu_pct || 0).toFixed(0) + "%", t: view.payload.cpu_temp },
@@ -285,16 +356,199 @@ Item {
                     }
                 }
             }
+
             Text {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
-                text: "UPTIME  " + (view.payload.uptime || "—") + "\n"
-                    + "KERNEL  " + (view.payload.kernel || "—") + "\n"
-                    + "HOST    " + (view.payload.hostname || "—") + "\n"
-                    + "OS      " + (view.payload.os || "—")
-                    + (view.payload.vram ? ("\nVRAM    " + view.payload.vram) : "")
+                text: {
+                    var la = view.payload.loadavg || []
+                    var loadStr = la.length >= 3
+                        ? (Number(la[0]).toFixed(2) + "  " + Number(la[1]).toFixed(2) + "  " + Number(la[2]).toFixed(2))
+                        : "—"
+                    var freq = Number(view.payload.cpu_freq_mhz) > 0
+                        ? (Number(view.payload.cpu_freq_mhz).toFixed(0) + " MHz") : "N/A"
+                    var ramLine = view.payload.mem_total
+                        ? (view.bytesHuman(view.payload.mem_used) + " / " + view.bytesHuman(view.payload.mem_total)
+                           + "  avail " + view.bytesHuman(view.payload.mem_avail))
+                        : "—"
+                    var swapLine = Number(view.payload.swap_total) > 0
+                        ? (view.bytesHuman(view.payload.swap_used) + " / " + view.bytesHuman(view.payload.swap_total))
+                        : "none"
+                    return "LOAD    " + loadStr + "\n"
+                        + "FREQ    " + freq + "\n"
+                        + "RAM     " + ramLine + "\n"
+                        + "SWAP    " + swapLine + "\n"
+                        + "UPTIME  " + (view.payload.uptime || "—") + "\n"
+                        + "KERNEL  " + (view.payload.kernel || "—") + "\n"
+                        + "HOST    " + (view.payload.hostname || "—") + "\n"
+                        + "OS      " + (view.payload.os || "—")
+                        + (view.payload.vram ? ("\nVRAM    " + view.payload.vram) : "")
+                }
                 color: view.sys.colMuted
                 font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2 }
+            }
+
+            // Process list header
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.topMargin: 4
+                spacing: 8
+                Text {
+                    text: "PROCESSES"
+                    color: view.sys.colMuted
+                    font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 4; bold: true; letterSpacing: 1 }
+                }
+                Item { Layout.fillWidth: true }
+                Rectangle {
+                    height: 22; radius: 8
+                    width: sortCpuLbl.implicitWidth + 14
+                    color: view.procSort === "cpu" ? Qt.rgba(1,1,1,0.10) : Qt.rgba(1,1,1,0.04)
+                    Text {
+                        id: sortCpuLbl
+                        anchors.centerIn: parent
+                        text: "CPU"
+                        color: view.procSort === "cpu" ? view.sys.colFg : view.sys.colMuted
+                        font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: view.procSort = "cpu"
+                    }
+                }
+                Rectangle {
+                    height: 22; radius: 8
+                    width: sortMemLbl.implicitWidth + 14
+                    color: view.procSort === "mem" ? Qt.rgba(1,1,1,0.10) : Qt.rgba(1,1,1,0.04)
+                    Text {
+                        id: sortMemLbl
+                        anchors.centerIn: parent
+                        text: "RAM"
+                        color: view.procSort === "mem" ? view.sys.colFg : view.sys.colMuted
+                        font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: view.procSort = "mem"
+                    }
+                }
+                Rectangle {
+                    height: 22; radius: 8
+                    width: refreshLbl.implicitWidth + 14
+                    color: Qt.rgba(1,1,1,0.04)
+                    Text {
+                        id: refreshLbl
+                        anchors.centerIn: parent
+                        text: "↻"
+                        color: view.sys.colMuted
+                        font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2 }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: view.refresh()
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                Text { Layout.preferredWidth: 52; text: "PID"; color: view.sys.colMuted; font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 } }
+                Text { Layout.fillWidth: true; text: "PROCESS"; color: view.sys.colMuted; font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 } }
+                Text { Layout.preferredWidth: 44; horizontalAlignment: Text.AlignRight; text: "CPU"; color: view.sys.colMuted; font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 } }
+                Text { Layout.preferredWidth: 64; horizontalAlignment: Text.AlignRight; text: "RAM"; color: view.sys.colMuted; font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 } }
+            }
+
+            Repeater {
+                model: view.procList
+                delegate: Rectangle {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    height: 30
+                    radius: 8
+                    color: view.procDetailPid === modelData.pid
+                           ? Qt.rgba(1,1,1,0.08) : (rowMa.containsMouse ? Qt.rgba(1,1,1,0.05) : "transparent")
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 4
+                        anchors.rightMargin: 4
+                        spacing: 6
+                        Text {
+                            Layout.preferredWidth: 52
+                            text: String(modelData.pid)
+                            color: view.sys.colMuted
+                            font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2 }
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: modelData.name || "—"
+                            elide: Text.ElideRight
+                            color: view.sys.colFg
+                            font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2 }
+                        }
+                        Text {
+                            Layout.preferredWidth: 44
+                            horizontalAlignment: Text.AlignRight
+                            text: Number(modelData.cpu || 0).toFixed(1) + "%"
+                            color: view.sys.colFg
+                            font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2 }
+                        }
+                        Text {
+                            Layout.preferredWidth: 64
+                            horizontalAlignment: Text.AlignRight
+                            text: view.bytesHuman((Number(modelData.rss_kb) || 0) * 1024)
+                            color: view.sys.colMuted
+                            font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2 }
+                        }
+                    }
+                    MouseArea {
+                        id: rowMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: view.procDetailPid = (view.procDetailPid === modelData.pid) ? 0 : modelData.pid
+                    }
+                }
+            }
+
+            // Detalhe sob demanda (sem kill)
+            Rectangle {
+                visible: view.procDetailPid > 0 && view.processByPid(view.procDetailPid) !== null
+                Layout.fillWidth: true
+                radius: 12
+                color: Qt.rgba(1,1,1,0.04)
+                border.color: view.sys.colLine; border.width: 1
+                implicitHeight: procDetailCol.implicitHeight + 20
+                ColumnLayout {
+                    id: procDetailCol
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    spacing: 4
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        text: {
+                            var p = view.processByPid(view.procDetailPid)
+                            if (!p) return ""
+                            return "PID " + p.pid + "  " + (p.name || "") + "\n"
+                                + "CPU  " + Number(p.cpu || 0).toFixed(1) + "%\n"
+                                + "RAM  " + view.bytesHuman((Number(p.rss_kb) || 0) * 1024)
+                                + "  (" + Number(p.mem || 0).toFixed(1) + "%)"
+                        }
+                        color: view.sys.colMuted
+                        font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2 }
+                    }
+                }
+            }
+
+            Text {
+                visible: !(view.payload.processes && view.payload.processes.length)
+                Layout.fillWidth: true
+                text: "no process data"
+                color: view.sys.colMuted
+                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2; italic: true }
             }
         }
 
@@ -307,11 +561,16 @@ Item {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 text: "IFACE   " + (view.payload.iface || "—") + "\n"
-                    + "IP      " + (view.payload.ip || "—") + "\n"
+                    + "STATE   " + (view.payload.state || "—") + "  LINK " + (view.payload.link || "—") + "\n"
+                    + "SPEED   " + (view.payload.speed || "N/A") + "\n"
+                    + "IPv4    " + (view.payload.ip || "—") + "\n"
+                    + "IPv6    " + (view.payload.ip6 || "N/A") + "\n"
                     + "GATEWAY " + (view.payload.gateway || "—") + "\n"
                     + "DNS     " + (view.payload.dns || "—") + "\n"
-                    + "RX      " + view.bytesHuman(view.payload.rx_bytes) + "\n"
+                    + "RX      " + view.bytesHuman(view.payload.rx_bytes)
+                    + "  (" + view.bytesHuman(view.payload.rx_rate) + "/s)\n"
                     + "TX      " + view.bytesHuman(view.payload.tx_bytes)
+                    + "  (" + view.bytesHuman(view.payload.tx_rate) + "/s)"
                 color: view.sys.colMuted
                 font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 1 }
             }
@@ -348,9 +607,21 @@ Item {
             Text {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
-                text: "ROOT    " + ((view.payload.root && view.payload.root.pct) || "—") + "%\n"
-                    + "/srv    " + ((view.payload.srv && view.payload.srv.pct) || "—") + "%\n"
-                    + "HEALTH  " + (view.payload.health || "—")
+                text: {
+                    function diskLine(label, d) {
+                        if (!d) return label + "  N/A"
+                        return label + "  " + (d.pct || 0) + "%  "
+                            + view.bytesHuman((d.used_kb || 0) * 1024) + " / "
+                            + view.bytesHuman((d.size_kb || 0) * 1024)
+                            + "  free " + view.bytesHuman((d.avail_kb || 0) * 1024)
+                    }
+                    return diskLine("ROOT", view.payload.root) + "\n"
+                        + diskLine("/srv", view.payload.srv) + "\n"
+                        + "I/O     " + (view.payload.io_dev || "N/A") + "\n"
+                        + "READ    " + view.bytesHuman(view.payload.read_bps) + "/s\n"
+                        + "WRITE   " + view.bytesHuman(view.payload.write_bps) + "/s\n"
+                        + "HEALTH  " + (view.payload.health || "—")
+                }
                 color: view.sys.colMuted
                 font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 1 }
             }
@@ -538,11 +809,20 @@ Item {
             }
         }
 
-        // ---------------- RUN / SERVICES
+        // ---------------- RUN / BACKGROUND TERMINALS
         ColumnLayout {
             Layout.fillWidth: true
-            spacing: 8
+            spacing: view.termGap
             visible: view.section === "run" && !view.creating && view.detail === ""
+
+            Text {
+                text: view.sys.tr("Persistent via systemd — Terminal is only a window into the process")
+                color: view.sys.colMuted
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
+            }
+
             HomelabBtn {
                 label: "+ NEW SERVICE"
                 primary: true
@@ -554,92 +834,279 @@ Item {
                     view.formPort = "3000"
                 }
             }
-            Text {
-                text: view.sys.tr("Persistent via systemd --user · closing Terminal does not stop the process")
-                color: view.sys.colMuted
-                wrapMode: Text.Wrap
-                Layout.fillWidth: true
-                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
-            }
+
+            // Compact service surfaces (background terminals)
             Repeater {
                 model: view.payload.services || []
                 delegate: Rectangle {
+                    id: termCard
                     required property var modelData
                     Layout.fillWidth: true
-                    height: 52
-                    radius: 14
-                    color: sMa.containsMouse ? Qt.rgba(1,1,1,0.06) : Qt.rgba(1,1,1,0.03)
-                    border.color: view.sys.colLine; border.width: 1
+                    implicitHeight: termBody.implicitHeight + view.termPadY * 2
+                    radius: view.termRadius
+                    color: termMa.containsMouse
+                           ? Qt.rgba(1, 1, 1, 0.06)
+                           : Qt.rgba(view.sys.colFg.r, view.sys.colFg.g, view.sys.colFg.b, 0.04)
+                    border.color: view.sys.colLine
+                    border.width: 1
+
+                    // Subtle live pulse — only when RUNNING (opacity, not blink)
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: view.termAccentW
+                        radius: 2
+                        visible: String(termCard.modelData.status || "") === "RUNNING"
+                        color: view.sys.colOk
+                        SequentialAnimation on opacity {
+                            running: String(termCard.modelData.status || "") === "RUNNING"
+                            loops: Animation.Infinite
+                            NumberAnimation { from: 0.35; to: 0.85; duration: 1600; easing.type: Easing.InOutSine }
+                            NumberAnimation { from: 0.85; to: 0.35; duration: 1600; easing.type: Easing.InOutSine }
+                        }
+                    }
+
                     ColumnLayout {
-                        anchors.fill: parent; anchors.margins: 10; spacing: 2
+                        id: termBody
+                        anchors {
+                            left: parent.left; right: parent.right
+                            verticalCenter: parent.verticalCenter
+                            leftMargin: view.termPadX; rightMargin: view.termPadY
+                        }
+                        spacing: view.termInnerGap
+
                         RowLayout {
                             Layout.fillWidth: true
-                            Text { text: modelData.running ? "●" : "○"; color: modelData.running ? view.sys.colOk : (modelData.state === "failed" ? view.sys.colCrit : view.sys.colMuted) }
+                            spacing: 8
                             Text {
-                                text: modelData.name
-                                color: view.sys.colFg
+                                text: view.statusGlyph(termCard.modelData.status)
+                                color: view.statusColorOf(termCard.modelData.status)
                                 font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 1 }
-                                Layout.fillWidth: true
                             }
                             Text {
-                                text: modelData.state ? String(modelData.state).toUpperCase() : ""
+                                text: String(termCard.modelData.name || "").toUpperCase()
+                                color: view.sys.colFg
+                                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 1; letterSpacing: 0.8 }
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
+                            }
+                            Text {
+                                text: String(termCard.modelData.status || "").toUpperCase()
+                                color: view.statusColorOf(termCard.modelData.status)
+                                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3; letterSpacing: 0.6 }
+                            }
+                        }
+
+                        Text {
+                            visible: String(termCard.modelData.command || "").length > 0
+                            text: "$ " + (termCard.modelData.command || "")
+                            color: view.sys.colMuted
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                            font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2 }
+                        }
+
+                        Text {
+                            visible: String(termCard.modelData.last_log || "").length > 0
+                            text: "> " + (termCard.modelData.last_log || "")
+                            color: Qt.rgba(view.sys.colFg.r, view.sys.colFg.g, view.sys.colFg.b, 0.55)
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                            font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+                            Text {
+                                visible: Number(termCard.modelData.port) > 0
+                                text: ":" + termCard.modelData.port
                                 color: view.sys.colMuted
                                 font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
                             }
-                        }
-                        Text {
-                            text: modelData.command || ""
-                            color: view.sys.colMuted
-                            elide: Text.ElideRight
-                            font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
+                            Text {
+                                visible: Number(termCard.modelData.pid) > 0
+                                text: "PID " + termCard.modelData.pid
+                                color: view.sys.colMuted
+                                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
+                            }
+                            Text {
+                                visible: String(termCard.modelData.uptime || "").length > 0
+                                text: "UP " + (termCard.modelData.uptime || "")
+                                color: view.sys.colMuted
+                                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
+                            }
+                            Item { Layout.fillWidth: true }
                         }
                     }
+
                     MouseArea {
-                        id: sMa; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor
-                        onClicked: view.detail = modelData.name
+                        id: termMa
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            view.logLines = []
+                            view.detail = termCard.modelData.name
+                        }
                     }
                 }
+            }
+
+            Text {
+                visible: !(view.payload.services && view.payload.services.length)
+                text: view.sys.tr("No background services yet")
+                color: view.sys.colMuted
+                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2 }
             }
         }
 
-        // RUN detail
+        // RUN detail — focused background terminal surface
         ColumnLayout {
             Layout.fillWidth: true
-            spacing: 8
+            spacing: view.termGap
             visible: view.section === "run" && !view.creating && view.detail !== ""
-            Text {
-                text: view.detail.toUpperCase()
-                color: view.sys.colFg
-                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize }
-            }
-            RowLayout {
-                spacing: 8
-                HomelabBtn { label: "START"; onClicked: view.runAction(["service-start", view.detail]) }
-                HomelabBtn { label: "STOP"; onClicked: view.runAction(["service-stop", view.detail]) }
-                HomelabBtn { label: "RESTART"; onClicked: view.runAction(["service-restart", view.detail]) }
-            }
-            RowLayout {
-                spacing: 8
-                HomelabBtn { label: "LOGS"; onClicked: view.runAction(["service-logs", view.detail]) }
-                HomelabBtn {
-                    label: "TERMINAL"
-                    onClicked: {
-                        var svc = null
-                        var list = view.payload.services || []
-                        for (var i = 0; i < list.length; i++) if (list[i].name === view.detail) svc = list[i]
-                        view.openTerm(svc && svc.directory ? svc.directory : "")
+
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: focusBody.implicitHeight + view.termPadY * 2 + 4
+                radius: view.termRadius
+                color: Qt.rgba(view.sys.colFg.r, view.sys.colFg.g, view.sys.colFg.b, 0.045)
+                border.color: view.sys.colLine
+                border.width: 1
+
+                Rectangle {
+                    anchors.left: parent.left
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    width: view.termAccentW
+                    radius: 2
+                    color: view.statusColorOf(view.selectedService() ? view.selectedService().status : "")
+                    opacity: 0.85
+                }
+
+                ColumnLayout {
+                    id: focusBody
+                    anchors {
+                        left: parent.left; right: parent.right
+                        verticalCenter: parent.verticalCenter
+                        leftMargin: view.termPadX + 2; rightMargin: view.termPadY
+                    }
+                    spacing: view.termInnerGap + 2
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Text {
+                            text: view.statusGlyph(view.selectedService() ? view.selectedService().status : "")
+                            color: view.statusColorOf(view.selectedService() ? view.selectedService().status : "")
+                            font { family: view.sys.fontBody; pixelSize: view.sys.fontSize }
+                        }
+                        Text {
+                            text: String(view.selectedService() ? view.selectedService().status : "").toUpperCase()
+                            color: view.statusColorOf(view.selectedService() ? view.selectedService().status : "")
+                            font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2; letterSpacing: 1 }
+                        }
+                        Item { Layout.fillWidth: true }
+                    }
+
+                    Text {
+                        text: "$ " + ((view.selectedService() && view.selectedService().command) || "—")
+                        color: view.sys.colFg
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                        font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 1 }
+                    }
+
+                    Text {
+                        visible: !!(view.selectedService() && view.selectedService().directory)
+                        text: (view.selectedService() && view.selectedService().directory) || ""
+                        color: view.sys.colMuted
+                        elide: Text.ElideMiddle
+                        Layout.fillWidth: true
+                        font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
+                    }
+
+                    Text {
+                        visible: !!(view.selectedService() && view.selectedService().last_log)
+                        text: "> " + ((view.selectedService() && view.selectedService().last_log) || "")
+                        color: Qt.rgba(view.sys.colFg.r, view.sys.colFg.g, view.sys.colFg.b, 0.6)
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                        font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        color: view.sys.colMuted
+                        font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
+                        text: {
+                            var s = view.selectedService()
+                            if (!s) return ""
+                            var parts = []
+                            if (s.pid) parts.push("PID " + s.pid)
+                            if (Number(s.port) > 0) parts.push("PORT " + s.port)
+                            if (s.uptime) parts.push("UP " + s.uptime)
+                            if (s.restarts) parts.push("RESTARTS " + s.restarts)
+                            if (s.last_exit && s.last_exit !== "success") parts.push("EXIT " + s.last_exit)
+                            return parts.join("   ·   ")
+                        }
                     }
                 }
             }
-            Repeater {
-                model: view.logLines
-                delegate: Text {
-                    required property string modelData
-                    Layout.fillWidth: true
-                    text: modelData
+
+            RowLayout {
+                spacing: 8
+                HomelabBtn {
+                    label: "TERMINAL"
+                    primary: true
+                    onClicked: {
+                        var s = view.selectedService()
+                        view.openTerm(s && s.directory ? s.directory : "")
+                    }
+                }
+                HomelabBtn {
+                    label: "LOGS"
+                    onClicked: {
+                        view.runAction(["service-logs", view.detail])
+                    }
+                }
+                HomelabBtn {
+                    label: "RESTART"
+                    onClicked: view.runAction(["service-restart", view.detail])
+                }
+                HomelabBtn {
+                    label: (view.selectedService() && view.selectedService().running) ? "STOP" : "START"
+                    onClicked: {
+                        var s = view.selectedService()
+                        if (s && s.running) view.runAction(["service-stop", view.detail])
+                        else view.runAction(["service-start", view.detail])
+                    }
+                }
+            }
+
+            // Full log tail when LOGS was requested (keeps context of focused service)
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 4
+                visible: view.logLines && view.logLines.length > 0
+                Text {
+                    text: view.sys.tr("JOURNAL")
                     color: view.sys.colMuted
-                    wrapMode: Text.WrapAnywhere
-                    font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
+                    font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3; letterSpacing: 1 }
+                }
+                Repeater {
+                    model: view.logLines
+                    delegate: Text {
+                        required property string modelData
+                        Layout.fillWidth: true
+                        text: modelData
+                        color: view.sys.colMuted
+                        wrapMode: Text.WrapAnywhere
+                        font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 3 }
+                    }
                 }
             }
         }
