@@ -13,14 +13,37 @@ Item {
     property string procSort: "cpu"
     property int procDetailPid: 0
     property bool loaded: false
-    property string tab: "current"   // current | history | processes
+    property string tab: "current"   // current | history | processes | happening
     property string tipText: ""
+    property real metricsAgeSec: -1
 
     implicitHeight: col.implicitHeight
     focus: true
 
     function goBack() { view.sys.page = "main"; return true }
     Keys.onEscapePressed: view.goBack()
+
+    function setTab(id) {
+        view.tab = id
+        if (view.sys && view.sys.patchUiMemory)
+            view.sys.patchUiMemory({ sysloadTab: id })
+    }
+
+    function refreshAge() {
+        var h = view.sys.metricsHistory || []
+        if (!h.length) { view.metricsAgeSec = -1; return }
+        var ts = Number(h[h.length - 1].ts) || 0
+        if (!ts) { view.metricsAgeSec = -1; return }
+        view.metricsAgeSec = Math.max(0, Math.floor(Date.now() / 1000 - ts))
+    }
+
+    function ageLabel() {
+        var a = view.metricsAgeSec
+        if (a < 0) return ""
+        if (a <= 1) return "updated just now"
+        if (a < 60) return "updated " + a + "s ago"
+        return "updated " + Math.floor(a / 60) + "m ago"
+    }
 
     readonly property string sh: view.sys.scriptDir + "/homelab.sh"
     readonly property var hist: view.sys.metricsSlice ? view.sys.metricsSlice() : []
@@ -89,7 +112,19 @@ Item {
         onTriggered: if (!pSys.running) view.refresh()
     }
 
-    Component.onCompleted: forceActiveFocus()
+    Component.onCompleted: {
+        forceActiveFocus()
+        var mem = view.sys.uiMemory || {}
+        if (mem.sysloadTab) view.tab = mem.sysloadTab
+        view.refreshAge()
+    }
+
+    Timer {
+        interval: 1000
+        repeat: true
+        running: view.visible
+        onTriggered: view.refreshAge()
+    }
 
     // ---------- sparkline reutilizável
     component Spark: Item {
@@ -236,6 +271,12 @@ Item {
                 color: view.sys.colFg
                 font { family: view.sys.fontFam; pixelSize: view.sys.fontSize + 1; bold: true }
             }
+            Text {
+                visible: view.ageLabel().length > 0
+                text: view.ageLabel()
+                color: view.sys.colMuted
+                font { family: view.sys.fontFam; pixelSize: 9 }
+            }
         }
 
         // tabs
@@ -245,6 +286,7 @@ Item {
             Repeater {
                 model: [
                     { id: "current", label: "CURRENT" },
+                    { id: "happening", label: "NOW" },
                     { id: "history", label: "HISTORY" },
                     { id: "processes", label: "PROCESSES" }
                 ]
@@ -263,7 +305,7 @@ Item {
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: view.tab = modelData.id
+                        onClicked: view.setTab(modelData.id)
                     }
                 }
             }
@@ -302,8 +344,16 @@ Item {
                                 font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2; letterSpacing: 1 }
                             }
                             Item { Layout.fillWidth: true }
+                            SmoothNumber {
+                                target: Math.max(0, Number(modelData.v) || 0)
+                                decimals: 0
+                                suffix: "%"
+                                sys: view.sys
+                                visible: Number(modelData.v) >= 0
+                            }
                             Text {
-                                text: (Number(modelData.v) < 0 ? "—" : Number(modelData.v).toFixed(0) + "%")
+                                visible: Number(modelData.v) < 0
+                                text: "—"
                                 color: view.sys.colFg
                                 font { family: view.sys.fontFam; pixelSize: view.sys.fontSize }
                             }
@@ -347,6 +397,73 @@ Item {
                 }
                 color: view.sys.colMuted
                 font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2 }
+            }
+        }
+
+        // -------- WHAT'S HAPPENING (NOW)
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 8
+            visible: view.tab === "happening"
+
+            Text {
+                text: "WHAT'S HAPPENING?"
+                color: view.sys.colMuted
+                font { family: view.sys.fontFam; pixelSize: 10; letterSpacing: 1 }
+            }
+
+            Repeater {
+                model: {
+                    var h = view.sys.metricsHistory || []
+                    var last = h.length ? h[h.length - 1] : {}
+                    var tops = (view.payload.processes || []).slice(0, 3)
+                    var rows = [
+                        { k: "CPU", v: (Number(view.sys.loadCpu) >= 0 ? Number(view.sys.loadCpu).toFixed(0) + "%" : "—") },
+                        { k: "RAM", v: (Number(view.sys.loadMem) >= 0 ? Number(view.sys.loadMem).toFixed(0) + "%" : "—") },
+                        { k: "GPU", v: (Number(view.sys.loadGpu) >= 0 ? Number(view.sys.loadGpu).toFixed(0) + "%" : "—") },
+                        { k: "NETWORK ↓", v: last.rx_rate !== undefined && last.rx_rate !== null ? view.bytesHuman(last.rx_rate) + "/s" : "—" },
+                        { k: "NETWORK ↑", v: last.tx_rate !== undefined && last.tx_rate !== null ? view.bytesHuman(last.tx_rate) + "/s" : "—" },
+                        { k: "DISK WRITE", v: last.write_bps !== undefined && last.write_bps !== null ? view.bytesHuman(last.write_bps) + "/s" : "—" }
+                    ]
+                    for (var i = 0; i < tops.length; i++) {
+                        var p = tops[i]
+                        rows.push({
+                            k: "PROC  " + String(p.name || p.cmd || "?").slice(0, 18),
+                            v: (Number(p.cpu) || 0).toFixed(1) + "%"
+                        })
+                    }
+                    return rows
+                }
+                delegate: Rectangle {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    height: 32
+                    radius: 10
+                    color: Qt.rgba(1, 1, 1, 0.04)
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        Text {
+                            text: modelData.k
+                            color: view.sys.colMuted
+                            font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2 }
+                            Layout.fillWidth: true
+                        }
+                        Text {
+                            text: modelData.v
+                            color: view.sys.colFg
+                            font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 1 }
+                        }
+                    }
+                }
+            }
+
+            Text {
+                visible: !view.loaded
+                text: "◌ READING"
+                color: view.sys.colWarn
+                font { family: view.sys.fontFam; pixelSize: 11 }
             }
         }
 

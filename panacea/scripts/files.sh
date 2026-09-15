@@ -83,11 +83,13 @@ case "$1" in
     list)
         DIR="${2:-$HOME}"
         DIR="${DIR/#\~/$HOME}"
+        # $3 = hidden | "" ; soft-cap evita congelar UI em pastas enormes
         py - "$DIR" "${3:-}" <<'EOF'
 import os, sys, mimetypes
 
 d = sys.argv[1]
 show_hidden = len(sys.argv) > 2 and sys.argv[2] == 'hidden'
+LIMIT = 2500
 try:
     entries = list(os.scandir(d))
 except OSError:
@@ -108,10 +110,14 @@ for e in entries:
         files.append((e.name, st.st_size, int(st.st_mtime), mime))
 
 key = lambda t: t[0].lower()
-for name, size, mtime, mime in sorted(dirs, key=key):
-    print(f"d|{name}|{size}|{mtime}|{mime}")
-for name, size, mtime, mime in sorted(files, key=key):
-    print(f"f|{name}|{size}|{mtime}|{mime}")
+dirs.sort(key=key)
+files.sort(key=key)
+all_rows = [("d",) + t for t in dirs] + [("f",) + t for t in files]
+total = len(all_rows)
+shown = min(total, LIMIT)
+print(f"#meta|{total}|{shown}")
+for kind, name, size, mtime, mime in all_rows[:LIMIT]:
+    print(f"{kind}|{name}|{size}|{mtime}|{mime}")
 EOF
         ;;
 
@@ -197,6 +203,14 @@ EOF
         D="${2:?}"; N="${3:?}"
         D="${D/#\~/$HOME}"
         mkdir -p "$D/$N"
+        ;;
+
+    touch)
+        D="${2:?}"; N="${3:?}"
+        D="${D/#\~/$HOME}"
+        # não sobrescrever
+        [ -e "$D/$N" ] && exit 1
+        : > "$D/$N"
         ;;
 
     rename)
@@ -522,8 +536,279 @@ ejectdisk)
         find "$d" -mindepth 1 -maxdepth 1 | wc -l
         ;;
 
+    # FM 2.0 — helpers partilhados (UI + futuro Bonsai)
+    # Nota: $1 é sempre o subcomando; paths começam em $2.
+    exists)
+        if [ -d "$2" ]; then echo dir
+        elif [ -e "$2" ]; then echo file
+        else echo missing
+        fi
+        ;;
+
+    resolve)
+        py - "$2" "$3" <<'PY'
+import os, sys
+base, raw = sys.argv[1], sys.argv[2].strip()
+home = os.path.expanduser("~")
+if raw == "~":
+    path = home
+elif raw.startswith("~/"):
+    path = os.path.join(home, raw[2:])
+elif raw.startswith("/"):
+    path = raw
+else:
+    path = os.path.join(base or home, raw)
+print(os.path.abspath(path))
+PY
+        ;;
+
+    favorites-list|recent-list|favorites-add|favorites-remove|recent-push)
+        META="${XDG_CONFIG_HOME:-$HOME/.config}/panacea/files_meta.json"
+        mkdir -p "$(dirname "$META")"
+        py - "$META" "$1" "${2:-}" "${3:-}" <<'PY'
+import json, os, sys, time
+path, op = sys.argv[1], sys.argv[2]
+arg = sys.argv[3] if len(sys.argv) > 3 else ""
+label = sys.argv[4] if len(sys.argv) > 4 else ""
+data = {"favorites": [], "recent": []}
+if os.path.isfile(path):
+    try:
+        with open(path) as f:
+            data.update(json.load(f) or {})
+    except Exception:
+        pass
+favs = list(data.get("favorites") or [])
+rec = list(data.get("recent") or [])
+
+def save():
+    data["favorites"] = favs
+    data["recent"] = rec
+    with open(path, "w") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+if op == "favorites-list":
+    for e in favs:
+        p = e.get("path") if isinstance(e, dict) else e
+        n = (e.get("label") if isinstance(e, dict) else "") or os.path.basename(p.rstrip("/")) or p
+        print(f"{p}|{n}")
+elif op == "recent-list":
+    for e in rec[:16]:
+        p = e.get("path") if isinstance(e, dict) else e
+        print(p)
+elif op == "favorites-add":
+    if not arg: raise SystemExit(0)
+    favs = [e for e in favs if (e.get("path") if isinstance(e, dict) else e) != arg]
+    favs.insert(0, {"path": arg, "label": label or os.path.basename(arg.rstrip("/")) or arg})
+    favs = favs[:24]
+    save()
+elif op == "favorites-remove":
+    favs = [e for e in favs if (e.get("path") if isinstance(e, dict) else e) != arg]
+    save()
+elif op == "recent-push":
+    if not arg or not os.path.isdir(arg): raise SystemExit(0)
+    arg = os.path.abspath(arg)
+    rec = [e for e in rec if (e.get("path") if isinstance(e, dict) else e) != arg]
+    rec.insert(0, {"path": arg, "at": int(time.time())})
+    rec = rec[:16]
+    save()
+PY
+        ;;
+
+    restore)
+        shift
+        for p in "$@"; do
+            p="${p/#\~/$HOME}"
+            [ -e "$p" ] || continue
+            if gio trash --restore "$p" 2>/dev/null; then
+                continue
+            fi
+            base=$(basename -- "$p")
+            trash_root=$(dirname "$(dirname -- "$p")")
+            info="$trash_root/info/${base}.trashinfo"
+            dest=""
+            if [ -f "$info" ]; then
+                dest=$(grep -m1 '^Path=' "$info" 2>/dev/null | cut -d= -f2-)
+                dest=$(python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.argv[1]))" "$dest" 2>/dev/null || echo "$dest")
+            fi
+            if [ -n "$dest" ]; then
+                mkdir -p "$(dirname -- "$dest")" 2>/dev/null || true
+                mv -n -- "$p" "$dest" 2>/dev/null || mv -- "$p" "$dest"
+                rm -f -- "$info"
+            else
+                mkdir -p "$HOME/Restored"
+                mv -n -- "$p" "$HOME/Restored/" 2>/dev/null || mv -- "$p" "$HOME/Restored/"
+            fi
+        done
+        ;;
+
+    delete-permanent)
+        shift
+        for p in "$@"; do
+            p="${p/#\~/$HOME}"
+            base=$(basename -- "$p")
+            trash_root=$(dirname "$(dirname -- "$p")")
+            case "$trash_root" in
+                */Trash)
+                    rm -f -- "$trash_root/info/${base}.trashinfo"
+                    ;;
+            esac
+            rm -rf -- "$p"
+        done
+        ;;
+
+    which-code)
+        command -v code >/dev/null 2>&1 && echo code || echo ""
+        ;;
+
+    git-brief)
+        d="${2:-}"
+        [ -d "$d" ] || { echo NONE; exit 0; }
+        if ! git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            echo NONE; exit 0
+        fi
+        n=$(git -C "$d" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+        if [ "${n:-0}" -eq 0 ]; then echo CLEAN
+        else echo "$n CHANGED"
+        fi
+        ;;
+
+    git-status-list)
+        d="${2:-}"
+        [ -d "$d" ] || exit 0
+        git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+        git -C "$d" status --porcelain -u 2>/dev/null | head -80
+        ;;
+
+    git-log)
+        d="${2:-}"
+        [ -d "$d" ] || exit 0
+        git -C "$d" rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
+        git -C "$d" log --oneline -40 2>/dev/null
+        ;;
+
+    git-init)
+        d="${2:-}"
+        [ -d "$d" ] || exit 1
+        git -C "$d" init >/dev/null 2>&1
+        echo OK
+        ;;
+
+    path-complete)
+        # $2 cwd  $3 typed — até 12 sugestões
+        py - "$2" "$3" <<'PY'
+import os, sys
+cwd, raw = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "").strip()
+home = os.path.expanduser("~")
+
+def expand(s):
+    if s == "~":
+        return home
+    if s.startswith("~/"):
+        return os.path.join(home, s[2:])
+    if s.startswith("/"):
+        return s
+    return os.path.join(cwd, s)
+
+if not raw:
+    raw = cwd.rstrip("/") + "/"
+
+listing = raw.endswith("/")
+path = expand(raw)
+if listing:
+    directory = os.path.abspath(path)
+    prefix = ""
+else:
+    directory = os.path.dirname(os.path.abspath(path)) or "/"
+    prefix = os.path.basename(path)
+
+try:
+    names = sorted(os.listdir(directory))
+except OSError:
+    sys.exit(0)
+
+nout = 0
+for n in names:
+    if prefix and not n.lower().startswith(prefix.lower()):
+        continue
+    if n.startswith(".") and not (prefix.startswith(".") if prefix else False):
+        continue
+    full = os.path.join(directory, n)
+    is_dir = os.path.isdir(full)
+    print(("dir|" if is_dir else "file|") + full + ("/" if is_dir else ""))
+    nout += 1
+    if nout >= 12:
+        break
+PY
+        ;;
+
+    preview)
+        # $2 path — texto até 256KB; imagem só meta
+        f="${2:?}"
+        f="${f/#\~/$HOME}"
+        [ -f "$f" ] || { echo "error	not a file"; exit 1; }
+        bytes=$(stat -c '%s' "$f" 2>/dev/null || echo 0)
+        mime=$(file -b --mime-type "$f" 2>/dev/null || echo unknown)
+        emit() { printf '%s\t%s\n' "$1" "$2"; }
+        emit name "$(basename -- "$f")"
+        emit path "$f"
+        emit kind "$mime"
+        emit size_bytes "$bytes"
+        emit size_human "$(numfmt --to=iec --suffix=B "$bytes" 2>/dev/null || echo "$bytes")"
+        case "$mime" in
+            image/*)
+                emit preview_kind image
+                if command -v ffprobe >/dev/null 2>&1; then
+                    wh=$(ffprobe -v error -select_streams v:0 \
+                         -show_entries stream=width,height -of csv=p=0:s=x "$f" 2>/dev/null)
+                    [ -n "$wh" ] && emit resolution "$wh"
+                fi
+                exit 0
+                ;;
+        esac
+        ext="${f##*.}"
+        ext_lc=$(printf '%s' "$ext" | tr 'A-Z' 'a-z')
+        case "$ext_lc" in
+            txt|md|json|yaml|yml|toml|py|js|ts|tsx|jsx|sh|bash|zsh|css|html|htm|xml|ini|conf|cfg|rs|go|c|h|cpp|hpp|java|qml|lua|rb|php|sql|env|log|csv)
+                ;;
+            *)
+                case "$mime" in
+                    text/*|application/json|application/xml|application/x-sh|application/javascript) ;;
+                    *) emit preview_kind none; emit error "not previewable"; exit 0 ;;
+                esac
+                ;;
+        esac
+        if [ "${bytes:-0}" -gt 262144 ]; then
+            emit preview_kind too_large
+            emit error "file too large for preview (>256KB)"
+            exit 0
+        fi
+        emit preview_kind text
+        lines=$(wc -l < "$f" 2>/dev/null | tr -d ' ')
+        emit lines "${lines:-0}"
+        printf 'content_begin\t—\n'
+        head -c 262144 "$f" 2>/dev/null | tr -d '\0'
+        printf '\ncontent_end\t—\n'
+        ;;
+
+    terminal-here)
+        d="${2:-$HOME}"
+        [ -d "$d" ] || d="$(dirname "$d")"
+        [ -d "$d" ] || d="$HOME"
+        if command -v footclient >/dev/null 2>&1; then
+            setsid -f footclient --working-directory="$d" >/dev/null 2>&1
+        else
+            setsid -f foot --working-directory="$d" >/dev/null 2>&1
+        fi
+        ;;
+
+    open-code)
+        d="${2:-}"
+        command -v code >/dev/null 2>&1 || exit 1
+        setsid -f code -- "$d" >/dev/null 2>&1
+        ;;
+
     *)
-        echo "usage: files.sh list DIR | disks | apps P | open P [D] | mkdir D N | rename P N | trash P | copy S D | move S D | copypath P | places | emptytrash | trashcount" >&2
+        echo "usage: files.sh … preview | git-status-list | restore | delete-permanent | …" >&2
         exit 1
         ;;
 esac

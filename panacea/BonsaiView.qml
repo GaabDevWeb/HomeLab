@@ -35,9 +35,9 @@ Item {
         st = String(st || "").toUpperCase()
         if (st === "IDLE" || st === "READY") return "●"
         if (st === "THINKING") return "◌"
-        if (st === "EXECUTING") return "●"
+        if (st === "EXECUTING") return "◐"
         if (st === "DONE") return "✓"
-        if (st === "ERROR") return "×"
+        if (st === "ERROR") return "!"
         return "○"
     }
 

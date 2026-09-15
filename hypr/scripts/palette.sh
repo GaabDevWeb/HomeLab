@@ -40,30 +40,30 @@ fi
 # ------------------------------------------------------------------- foot
 # Foot не хочет '#' в значениях цветов.
 #
-# Prefer [colors]: Debian 13 ships foot 1.21 without [colors-dark] (that
-# dual-scheme section arrived later upstream). [colors] works on every
-# supported foot; we also force prefer-dark via gsettings below.
+# Debian 13 / foot 1.21: ONLY [colors]. [colors-dark] is invalid and prints
+# on every footclient window. Do NOT probe with --check-config /dev/stdin —
+# that path is flaky and has rewritten broken themes before.
 if [ -d "$HOME/.config/foot" ]; then
-    _foot_sec=colors
-    if printf '[colors-dark]\nforeground=ffffff\nbackground=000000\n' \
-        | foot --check-config --config=/dev/stdin >/dev/null 2>&1; then
-        _foot_sec=colors-dark
-    fi
     cat > "$HOME/.config/foot/theme" <<EOF
-[${_foot_sec}]
+[colors]
 foreground=${FG#\#}
 background=${TERM_BG#\#}
 selection-foreground=${TERM_BG#\#}
 selection-background=${FG#\#}
 EOF
-    unset _foot_sec
+    # Sanitize foot.ini / panacea-theme if an older install left colors-dark.
+    for _f in "$HOME/.config/foot/foot.ini" "$HOME/.config/foot/panacea-theme"; do
+        [ -f "$_f" ] || continue
+        grep -q '\[colors-dark\]' "$_f" 2>/dev/null || continue
+        sed -i 's/\[colors-dark\]/[colors]/g' "$_f"
+    done
+    unset _f
 fi
 
-# Секцию [colors-dark] foot читает, только если портал сообщает
-# color-scheme=prefer-dark. По умолчанию в системе стоит «default», и тема
-# молча игнорировалась: терминал оставался на сером 242424 вместо нашего
-# почти чёрного фона. Палитра у нас тёмная — заявляем это один раз здесь.
+# Prefer-dark for portals (harmless on foot 1.21; needed when colors-dark exists).
 gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true
+
+# (legacy comment kept below was about colors-dark portal gating — obsolete on Debian)
 
 # ------------------------------------------ fish, zed, btop, neovim (python)
 python3 <<EOF

@@ -14,6 +14,8 @@ Item {
     property var payload: ({})
     property var logLines: []
     property bool loaded: false
+    property string confirmAction: ""   // "stop:name" | "restart:name" | ""
+    property string applyState: ""      // QUERYING | APPLYING | ""
 
     // Create-service form
     property bool creating: false
@@ -80,9 +82,70 @@ Item {
     }
 
     function runAction(argv) {
+        view.applyState = "EXECUTING"
         pAct.command = ["bash", view.sh].concat(argv)
         pAct.running = false
         pAct.running = true
+    }
+
+    function askConfirm(kind, name) {
+        view.confirmAction = kind + ":" + name
+    }
+    function clearConfirm() { view.confirmAction = "" }
+    function doConfirm() {
+        var parts = String(view.confirmAction || "").split(":")
+        if (parts.length < 2) { view.clearConfirm(); return }
+        var kind = parts[0]
+        var name = parts.slice(1).join(":")
+        view.clearConfirm()
+        if (kind === "stop") view.runAction(["docker-action", "stop", name])
+        else if (kind === "restart") view.runAction(["docker-action", "restart", name])
+        else if (kind === "svc-stop") view.runAction(["service-stop", name])
+        else if (kind === "svc-restart") view.runAction(["service-restart", name])
+    }
+
+    function rateBars(bps) {
+        // spark discreto de 6 células a partir da taxa (bytes/s)
+        var n = Number(bps) || 0
+        var levels = "▁▂▃▄▅▆▇"
+        var out = ""
+        var scale = Math.max(1, Math.log10(n + 1) / 7)
+        for (var i = 0; i < 6; i++) {
+            var t = (i + 1) / 6
+            var idx = Math.min(6, Math.floor(scale * t * 6))
+            out += levels.charAt(idx)
+        }
+        return out
+    }
+
+    function containerGlyph(c) {
+        var st = String(c.state || "").toLowerCase()
+        var status = String(c.status || "").toLowerCase()
+        if (status.indexOf("unhealthy") >= 0) return "◐"
+        if (st === "running" || c.running) return "●"
+        if (st === "dead" || (status.indexOf("exited") >= 0 && status.indexOf("(1)") >= 0)) return "!"
+        if (st === "restarting") return "◌"
+        return "○"
+    }
+    function containerColor(c) {
+        var g = view.containerGlyph(c)
+        if (g === "!") return view.sys.colCrit
+        if (g === "◐" || g === "◌") return view.sys.colWarn
+        if (g === "●") return view.sys.colOk
+        return view.sys.colMuted
+    }
+
+    function dockerSummary() {
+        var list = view.payload.containers || []
+        var run = 0, unhealthy = 0, stopped = 0
+        for (var i = 0; i < list.length; i++) {
+            var c = list[i]
+            var g = view.containerGlyph(c)
+            if (g === "◐") unhealthy++
+            else if (c.running) run++
+            else stopped++
+        }
+        return { run: run, unhealthy: unhealthy, stopped: stopped, total: list.length }
     }
 
     function openTerm(cwd) {
@@ -124,6 +187,7 @@ Item {
                     var d = JSON.parse(text)
                     if (d.lines) view.logLines = d.lines
                 } catch (e) {}
+                view.applyState = ""
                 view.refresh()
             }
         }
@@ -145,13 +209,14 @@ Item {
         interval: view.section === "run" ? 8000 : 15000
         repeat: true
         running: true
-        onTriggered: if (view.section === "hub" || view.section === "sys" || view.section === "run") view.refresh()
+        onTriggered: if (view.section === "hub" || view.section === "sys" || view.section === "run"
+                         || view.section === "net" || view.section === "docker") view.refresh()
     }
 
     function statusGlyph(st) {
         var s = String(st || "").toUpperCase()
         if (s === "RUNNING") return "●"
-        if (s === "FAILED") return "×"
+        if (s === "FAILED") return "!"
         if (s === "STARTING" || s === "RESTARTING" || s === "STOPPING") return "◌"
         return "○"
     }
@@ -558,6 +623,12 @@ Item {
             spacing: 8
             visible: view.section === "net"
             Text {
+                visible: !view.loaded
+                text: "◌ QUERYING"
+                color: view.sys.colWarn
+                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2 }
+            }
+            Text {
                 Layout.fillWidth: true
                 wrapMode: Text.Wrap
                 text: "IFACE   " + (view.payload.iface || "—") + "\n"
@@ -568,9 +639,11 @@ Item {
                     + "GATEWAY " + (view.payload.gateway || "—") + "\n"
                     + "DNS     " + (view.payload.dns || "—") + "\n"
                     + "RX      " + view.bytesHuman(view.payload.rx_bytes)
-                    + "  (" + view.bytesHuman(view.payload.rx_rate) + "/s)\n"
+                    + "  (" + view.bytesHuman(view.payload.rx_rate) + "/s)  "
+                    + view.rateBars(view.payload.rx_rate) + "\n"
                     + "TX      " + view.bytesHuman(view.payload.tx_bytes)
-                    + "  (" + view.bytesHuman(view.payload.tx_rate) + "/s)"
+                    + "  (" + view.bytesHuman(view.payload.tx_rate) + "/s)  "
+                    + view.rateBars(view.payload.tx_rate)
                 color: view.sys.colMuted
                 font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 1 }
             }
@@ -680,9 +753,36 @@ Item {
             spacing: 6
             visible: view.section === "docker" && view.detail === ""
             Text {
-                visible: !(view.payload.ok)
-                text: view.sys.tr("Docker offline")
+                visible: !view.loaded
+                text: "◌ QUERYING"
                 color: view.sys.colWarn
+                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2 }
+            }
+            Text {
+                visible: view.loaded && !(view.payload.ok)
+                text: "! SERVICE UNAVAILABLE\ndocker daemon / socket\n[ open Terminal to inspect ]"
+                color: view.sys.colCrit
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 1 }
+            }
+            Text {
+                visible: view.loaded && view.payload.ok
+                text: {
+                    var s = view.dockerSummary()
+                    var g = s.unhealthy > 0 ? "◐" : (s.run > 0 ? "●" : "○")
+                    var line = "DOCKER " + g + "  " + s.run + " running"
+                    if (s.unhealthy) line += "  " + s.unhealthy + " unhealthy"
+                    if (s.stopped) line += "  " + s.stopped + " stopped"
+                    return line
+                }
+                color: view.sys.colFg
+                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 1 }
+            }
+            Text {
+                visible: view.loaded && view.payload.ok && (view.payload.containers || []).length === 0
+                text: "No containers."
+                color: view.sys.colMuted
                 font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 1 }
             }
             Repeater {
@@ -696,7 +796,10 @@ Item {
                     border.color: view.sys.colLine; border.width: 1
                     RowLayout {
                         anchors.fill: parent; anchors.margins: 12; spacing: 8
-                        Text { text: modelData.running ? "●" : "○"; color: modelData.running ? view.sys.colOk : view.sys.colMuted }
+                        Text {
+                            text: view.containerGlyph(modelData)
+                            color: view.containerColor(modelData)
+                        }
                         Text {
                             text: modelData.name
                             color: view.sys.colFg
@@ -730,11 +833,49 @@ Item {
                 color: view.sys.colFg
                 font { family: view.sys.fontBody; pixelSize: view.sys.fontSize }
             }
+            Text {
+                visible: view.applyState.length > 0
+                text: "◌ " + view.applyState
+                color: view.sys.colWarn
+                font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 2 }
+            }
+            // confirmação destrutiva
+            Rectangle {
+                Layout.fillWidth: true
+                visible: view.confirmAction === ("stop:" + view.detail)
+                         || view.confirmAction === ("restart:" + view.detail)
+                height: confCol.implicitHeight + 16
+                radius: 12
+                color: Qt.rgba(1, 1, 1, 0.06)
+                border.color: view.sys.colCrit
+                border.width: 1
+                ColumnLayout {
+                    id: confCol
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.margins: 10
+                    spacing: 8
+                    Text {
+                        text: (view.confirmAction.indexOf("stop:") === 0 ? "STOP CONTAINER?" : "RESTART CONTAINER?")
+                              + "\n" + view.detail
+                        color: view.sys.colFg
+                        wrapMode: Text.Wrap
+                        Layout.fillWidth: true
+                        font { family: view.sys.fontBody; pixelSize: view.sys.fontSize - 1 }
+                    }
+                    RowLayout {
+                        spacing: 8
+                        HomelabBtn { label: "CANCEL"; onClicked: view.clearConfirm() }
+                        HomelabBtn { label: view.confirmAction.indexOf("stop:") === 0 ? "STOP" : "RESTART"; onClicked: view.doConfirm() }
+                    }
+                }
+            }
             RowLayout {
                 spacing: 8
+                visible: view.confirmAction === ""
                 HomelabBtn { label: "LOGS"; onClicked: view.runAction(["docker-action", "logs", view.detail]) }
-                HomelabBtn { label: "RESTART"; onClicked: view.runAction(["docker-action", "restart", view.detail]) }
-                HomelabBtn { label: "STOP"; onClicked: view.runAction(["docker-action", "stop", view.detail]) }
+                HomelabBtn { label: "RESTART"; onClicked: view.askConfirm("restart", view.detail) }
+                HomelabBtn { label: "STOP"; onClicked: view.askConfirm("stop", view.detail) }
                 HomelabBtn { label: "SHELL"; onClicked: Quickshell.execDetached(["footclient", "-e", "docker", "exec", "-it", view.detail, "sh"]) }
             }
             Repeater {

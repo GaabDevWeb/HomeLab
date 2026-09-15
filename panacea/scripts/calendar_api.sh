@@ -31,5 +31,7 @@ print(json.dumps({"ok": True, "deadlines": dls}))
 PY
     ;;
   create) bash "$SH" create "$@" ;;
+  update) bash "$SH" create "$@" ;;
+  delete) bash "$SH" delete "$@" ;;
   *) echo '{"ok":false,"error":"usage"}'; exit 1 ;;
 esac

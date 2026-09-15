@@ -17,8 +17,15 @@ FocusScope {
     property string query: ""
     property var pins: []   // [{text, ts}]
     property bool ignoreSensitive: true
+    property string feedback: ""
+    property int sel: 0   // índice flat: pins primeiro, depois recent
 
     readonly property string pinsPath: Quickshell.env("HOME") + "/.config/panacea/clipboard_pins.json"
+
+    function flash(msg) {
+        view.feedback = msg
+        feedbackTimer.restart()
+    }
 
     function classify(text) {
         var t = String(text || "")
@@ -79,20 +86,22 @@ FocusScope {
     function copyText(text) {
         pCopy.command = ["sh", "-c", "printf '%s' \"$1\" | wl-copy", "_", text]
         pCopy.running = true
-        view.sys.collapse()
+        view.flash("✓ COPIED")
+        feedbackClose.restart()
     }
 
     function copyAt(section, i) {
         var m = section === "pin" ? pinnedModel : recentModel
         if (i < 0 || i >= m.count) return
         var row = m.get(i)
-        if (row.pinned)
+        if (row.pinned) {
             view.copyText(row.full)
-        else {
+        } else {
             pCopy.command = ["sh", "-c",
                 "printf '%s\\t' \"$1\" | cliphist decode | wl-copy", "_", row.cid]
             pCopy.running = true
-            view.sys.collapse()
+            view.flash("✓ COPIED")
+            feedbackClose.restart()
         }
     }
 
@@ -109,6 +118,51 @@ FocusScope {
         view.pins = next
         view.savePins()
         view.rebuildPinnedModel()
+        view.flash("✓ PINNED")
+    }
+
+    function totalCount() { return pinnedModel.count + recentModel.count }
+
+    function resolveSel() {
+        var n = view.totalCount()
+        if (n <= 0) { view.sel = 0; return null }
+        if (view.sel < 0) view.sel = 0
+        if (view.sel >= n) view.sel = n - 1
+        if (view.sel < pinnedModel.count)
+            return { section: "pin", i: view.sel }
+        return { section: "recent", i: view.sel - pinnedModel.count }
+    }
+
+    function activateSel() {
+        var r = view.resolveSel()
+        if (!r) return
+        view.copyAt(r.section, r.i)
+    }
+
+    function pinSel() {
+        var r = view.resolveSel()
+        if (!r) return
+        if (r.section === "pin") return
+        var row = recentModel.get(r.i)
+        if (!row || row.isImage) return
+        view.decodeThenPin(row.cid)
+    }
+
+    function deleteSel() {
+        var r = view.resolveSel()
+        if (!r) return
+        if (r.section === "pin") view.unpinAt(r.i)
+        else {
+            var row = recentModel.get(r.i)
+            if (row) view.deleteRecent(row.cid)
+        }
+    }
+
+    Timer { id: feedbackTimer; interval: 700; onTriggered: view.feedback = "" }
+    Timer {
+        id: feedbackClose
+        interval: 420
+        onTriggered: view.sys.collapse()
     }
 
     function unpinAt(i) {
@@ -247,16 +301,34 @@ FocusScope {
                         placeholderTextColor: view.sys.colMuted
                         font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2 }
                         background: null
-                        onTextEdited: { view.query = text; view.reload() }
+                        onTextEdited: { view.query = text; view.sel = 0; view.reload() }
 
                         Keys.onEscapePressed: view.sys.collapse()
-                        Keys.onReturnPressed: view.activeCopy()
-                        Keys.onDownPressed: { /* lista via mouse; Enter copia topo filtrado */ }
-                        Keys.onUpPressed: { }
+                        Keys.onReturnPressed: view.activateSel()
+                        Keys.onEnterPressed: view.activateSel()
+                        Keys.onDownPressed: {
+                            if (view.totalCount() > 0)
+                                view.sel = Math.min(view.sel + 1, view.totalCount() - 1)
+                        }
+                        Keys.onUpPressed: view.sel = Math.max(view.sel - 1, 0)
+                        Keys.onPressed: event => {
+                            if (event.key === Qt.Key_P && (event.modifiers & Qt.ControlModifier)) {
+                                view.pinSel(); event.accepted = true
+                            } else if (event.key === Qt.Key_Delete) {
+                                view.deleteSel(); event.accepted = true
+                            }
+                        }
                     }
 
                     Text {
-                        visible: view.sys.cfg.featVault
+                        visible: view.feedback.length > 0
+                        text: view.feedback
+                        color: view.sys.colOk
+                        font { family: view.sys.fontFam; pixelSize: 10; bold: true }
+                    }
+
+                    Text {
+                        visible: view.sys.cfg.featVault && view.feedback.length === 0
                         text: String.fromCodePoint(view.sys.vaultUnlocked ? 0xF0FC6 : 0xF033E)
                         color: view.sys.vaultUnlocked ? view.sys.colOk : view.sys.colMuted
                         font { family: view.sys.fontFam; pixelSize: view.sys.iconSize - 3 }
@@ -300,7 +372,9 @@ FocusScope {
                 Layout.fillWidth: true
                 height: 40
                 radius: 10
-                color: pinMa.containsMouse ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05)
+                color: (index === view.sel)
+                       ? Qt.rgba(1, 1, 1, 0.12)
+                       : (pinMa.containsMouse ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05))
                 RowLayout {
                     anchors.fill: parent
                     anchors.margins: 10
@@ -357,7 +431,9 @@ FocusScope {
                 Layout.fillWidth: true
                 height: 40
                 radius: 10
-                color: recMa.containsMouse ? Qt.rgba(1, 1, 1, 0.10) : "transparent"
+                color: (index + pinnedModel.count === view.sel)
+                       ? Qt.rgba(1, 1, 1, 0.12)
+                       : (recMa.containsMouse ? Qt.rgba(1, 1, 1, 0.10) : "transparent")
                 RowLayout {
                     anchors.fill: parent
                     anchors.margins: 10
@@ -418,7 +494,7 @@ FocusScope {
         Text {
             Layout.fillWidth: true
             visible: pinnedModel.count === 0 && recentModel.count === 0
-            text: view.query.length ? "nothing found" : "clipboard empty"
+            text: view.query.length ? "nothing found" : "No clipped items."
             color: view.sys.colMuted
             horizontalAlignment: Text.AlignHCenter
             font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2 }

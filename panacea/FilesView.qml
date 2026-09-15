@@ -72,6 +72,11 @@ Item {
     property string menuKind: "folder"   // "file" | "folder" | "trash"
     property real   menuX: 0
     property real   menuY: 0
+    // secções do menu — todas colapsadas por omissão
+    property bool   menuSecOpen: false
+    property bool   menuSecEdit: false
+    property bool   menuSecCreate: false
+    property bool   menuSecGit: false
 
     // диалог ввода имени
     property string dialogMode: ""      // "rename" | "mkdir"
@@ -83,6 +88,48 @@ Item {
     property real listShift: 0
     Behavior on listShift { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
     property int  navDir: 1             // 1 — внутрь, -1 — наверх
+
+    // -------------------- FM 2.0: abas + histórico + path edit
+    ListModel { id: fileTabs }
+    ListModel { id: favPlaces }
+    ListModel { id: recentPlaces }
+    property int  nextTabId: 1
+    property int  activeTabId: 0
+    property var  closedTabs: []
+    property var  histBack: ({})
+    property var  histFwd: ({})
+    property bool suppressHist: false
+    property bool pathEditing: false
+    property string pathEditText: ""
+    property string pathError: ""
+    property bool tabMenuOpen: false
+    property int  tabMenuTid: -1
+    property real tabMenuX: 0
+    property real tabMenuY: 0
+    property bool hasCode: false
+    property string gitBrief: ""
+    property bool confirmEmptyTrash: false
+    property bool confirmPermDelete: false
+    property var  permDeleteTargets: []
+
+    // Fase 4–5: preview / git panel / trash
+    property bool   previewOpen: false
+    property string previewPath: ""
+    property string previewKind: ""   // text | image | too_large | none | ""
+    property string previewText: ""
+    property string previewMeta: ""   // size · lines · mime
+    property string previewError: ""
+    property bool   gitPanelOpen: false
+    ListModel { id: gitLines }
+    property bool   trashConfirmOpen: false
+    property string trashConfirmMode: ""  // empty | permanent
+    property var    trashConfirmTargets: []
+    property int    listTotal: 0
+    property int    listShown: 0
+    property string gitPanelTitle: "GIT STATUS"
+    ListModel { id: pathSuggest }
+    property int    pathSuggestIndex: 0
+    property bool   watchArmed: false
 
     ListModel { id: entries }      // отфильтрованный список
     ListModel { id: rawEntries }   // всё, что вернул files.sh
@@ -104,9 +151,20 @@ Item {
             view.sys.filesStartDir = "";
         }
         if (!view.dir.length) view.dir = view.sys.filesDir;
+        if (fileTabs.count === 0) {
+            var tid = view.nextTabId++;
+            fileTabs.append({ tid: tid, path: view.dir, label: view.tabLabel(view.dir) });
+            view.activeTabId = tid;
+            view.histBack[tid] = [];
+            view.histFwd[tid] = [];
+        }
         forceActiveFocus();
         loadPlaces();
+        loadFavorites();
+        loadRecent();
+        checkCode();
         reload();
+        refreshGit();
     }
 
     // ---------------------------------------------------------------- чтение
@@ -114,7 +172,14 @@ Item {
         id: pList
         stdout: SplitParser {
             onRead: line => {
-                var p = line.trim().split("|");
+                var t = line.trim();
+                if (t.indexOf("#meta|") === 0) {
+                    var m = t.split("|");
+                    view.listTotal = parseInt(m[1]) || 0;
+                    view.listShown = parseInt(m[2]) || 0;
+                    return;
+                }
+                var p = t.split("|");
                 if (p.length < 5) return;
                 rawEntries.append({
                     eType: p[0], eName: p[1],
@@ -124,7 +189,83 @@ Item {
                 });
             }
         }
-        onRunningChanged: if (!running) view.applyFilter()
+        onRunningChanged: {
+            if (!running) {
+                view.applyFilter();
+                view.armWatch();
+            }
+        }
+    }
+
+    // Watcher: inotify quando existir; senão mtime poll leve (2.5s)
+    Process {
+        id: pWatch
+        stdout: SplitParser {
+            onRead: line => {
+                if (view.selfChange || pList.running || pAction.running) return;
+                watchDebounce.restart();
+            }
+        }
+    }
+    Timer {
+        id: watchDebounce
+        interval: 480
+        onTriggered: {
+            if (view.selfChange || pList.running) return;
+            view.reloadQuiet();
+        }
+    }
+    Timer {
+        id: watchPoll
+        interval: 2500
+        running: view.watchArmed && !pWatch.running
+        repeat: true
+        onTriggered: {
+            if (view.selfChange || pList.running) return;
+            pMtime.command = ["stat", "-c", "%Y", view.dir];
+            pMtime.running = false;
+            pMtime.running = true;
+        }
+    }
+    property string dirMtime: ""
+    Process {
+        id: pMtime
+        stdout: StdioCollector {
+            onStreamFinished: {
+                var m = text.trim();
+                if (!m.length) return;
+                if (view.dirMtime.length && view.dirMtime !== m)
+                    watchDebounce.restart();
+                view.dirMtime = m;
+            }
+        }
+    }
+    function armWatch() {
+        view.watchArmed = true;
+        view.dirMtime = "";
+        pWatch.running = false;
+        // inotifywait -m (monitor); se falhar, o poll assume
+        pWatch.command = ["sh", "-c",
+            "command -v inotifywait >/dev/null 2>&1 || exit 0; " +
+            "inotifywait -m -q -e create,delete,move,moved_to,moved_from,close_write --format %e \"$1\" 2>/dev/null",
+            "_", view.dir];
+        pWatch.running = true;
+        pMtime.command = ["stat", "-c", "%Y", view.dir];
+        pMtime.running = false;
+        pMtime.running = true;
+    }
+    function reloadQuiet() {
+        // reload sem animação de navegação
+        var prev = view.navDir;
+        view.navDir = 0;
+        rawEntries.clear();
+        // manter selection se possível — clear entries só após
+        pList.command = ["sh", "-c", view.scripts + " list \"$1\" \"$2\"", "_", view.dir,
+                         view.sys.cfg.filesHidden ? "hidden" : ""];
+        pList.running = false;
+        pList.running = true;
+        view.navDir = prev;
+        view.refreshGit();
     }
 
     Process {
@@ -196,7 +337,10 @@ Item {
     readonly property string trashDir:
         (Quickshell.env("XDG_DATA_HOME") || (Quickshell.env("HOME") + "/.local/share"))
         + "/Trash/files"
-    readonly property bool inTrash: view.dir === view.trashDir
+    readonly property bool inTrash: {
+        var t = view.trashDir;
+        return view.dir === t || (t.length > 0 && view.dir.indexOf(t + "/") === 0);
+    }
 
     Process {
         id: pTrashCount
@@ -313,7 +457,52 @@ Item {
 
     function emptyTrash() {
         closeMenu();
-        run(["sh", "-c", view.scripts + " emptytrash"], view.sys.tr("Корзина очищена"));
+        view.trashConfirmMode = "empty";
+        view.trashConfirmTargets = [];
+        view.trashConfirmOpen = true;
+    }
+    function doRestore(path) {
+        var targets = (view.selectedCount > 1 && (path === "" || view.isSelected(path)))
+                    ? view.selectedPaths.slice()
+                    : (path ? [path] : []);
+        if (!targets.length) return;
+        closeMenu();
+        var cmd = ["bash", view.scripts, "restore"].concat(targets);
+        run(cmd, "✓ RESTORED");
+        view.clearSelection();
+    }
+    function askDeletePermanent(path) {
+        var targets = (view.selectedCount > 1 && (path === "" || view.isSelected(path)))
+                    ? view.selectedPaths.slice()
+                    : (path ? [path] : []);
+        if (!targets.length) return;
+        closeMenu();
+        view.trashConfirmMode = "permanent";
+        view.trashConfirmTargets = targets;
+        view.trashConfirmOpen = true;
+    }
+    function confirmTrashAction() {
+        var mode = view.trashConfirmMode;
+        var targets = view.trashConfirmTargets.slice();
+        view.trashConfirmOpen = false;
+        view.trashConfirmMode = "";
+        view.trashConfirmTargets = [];
+        if (mode === "empty") {
+            run(["sh", "-c", view.scripts + " emptytrash"], view.sys.tr("Корзина очищена"));
+            return;
+        }
+        if (mode === "permanent" && targets.length) {
+            var cmd = ["bash", view.scripts, "delete-permanent"].concat(targets);
+            var label = targets.length === 1 ? view.baseName(targets[0])
+                                             : (targets.length + " " + view.sys.tr("файлов"));
+            run(cmd, "✓ DELETED · " + label);
+            view.clearSelection();
+        }
+    }
+    function cancelTrashConfirm() {
+        view.trashConfirmOpen = false;
+        view.trashConfirmMode = "";
+        view.trashConfirmTargets = [];
     }
 
     function loadPlaces() {
@@ -325,8 +514,11 @@ Item {
     function reload() {
         rawEntries.clear();
         entries.clear();
+        view.listTotal = 0;
+        view.listShown = 0;
         view.listOpacity = 0;
         view.listShift = 22 * view.navDir;
+        pWatch.running = false;
         pList.command = ["sh", "-c", view.scripts + " list \"$1\" \"$2\"", "_", view.dir,
                          view.sys.cfg.filesHidden ? "hidden" : ""];
         pList.running = false;
@@ -395,17 +587,522 @@ Item {
     }
 
     function go(path) {
+        if (!path || !path.length) return;
+        if (path !== view.dir && !view.suppressHist && view.activeTabId) {
+            var back = (view.histBack[view.activeTabId] || []).slice();
+            back.push(view.dir);
+            if (back.length > 48) back = back.slice(-48);
+            view.histBack[view.activeTabId] = back;
+            view.histFwd[view.activeTabId] = [];
+            view.histBack = Object.assign({}, view.histBack);
+            view.histFwd = Object.assign({}, view.histFwd);
+        }
         view.navDir = path.length < view.dir.length ? -1 : 1;
         view.filter = "";
         view.dir = path;
         view.openWithFile = "";
+        view.pathEditing = false;
+        view.pathError = "";
+        view.clearSelection();
+        view.syncActiveTabPath(path);
+        view.pushRecent(path);
         view.reload();
+        view.refreshGit();
     }
     function up() {
         if (view.dir === "/") return;
         var p = view.dir.replace(/\/+$/, "");
         var i = p.lastIndexOf("/");
         go(i <= 0 ? "/" : p.slice(0, i));
+    }
+
+    function tabLabel(path) {
+        var home = Quickshell.env("HOME");
+        if (path === home || path === home + "/") return "HOME";
+        var base = String(path).replace(/\/+$/, "").split("/").pop();
+        return base && base.length ? base : "/";
+    }
+    function syncActiveTabPath(path) {
+        for (var i = 0; i < fileTabs.count; i++) {
+            if (fileTabs.get(i).tid === view.activeTabId) {
+                fileTabs.setProperty(i, "path", path);
+                fileTabs.setProperty(i, "label", view.tabLabel(path));
+                return;
+            }
+        }
+    }
+    function newTab(path) {
+        var p = path && path.length ? path : Quickshell.env("HOME");
+        var tid = view.nextTabId++;
+        fileTabs.append({ tid: tid, path: p, label: view.tabLabel(p) });
+        view.histBack[tid] = [];
+        view.histFwd[tid] = [];
+        view.histBack = Object.assign({}, view.histBack);
+        view.histFwd = Object.assign({}, view.histFwd);
+        view.switchTab(tid);
+    }
+    function switchTab(tid) {
+        if (tid === view.activeTabId) return;
+        var path = "";
+        for (var i = 0; i < fileTabs.count; i++) {
+            if (fileTabs.get(i).tid === tid) { path = fileTabs.get(i).path; break; }
+        }
+        if (!path.length) return;
+        view.activeTabId = tid;
+        view.suppressHist = true;
+        view.filter = "";
+        view.clearSelection();
+        view.openWithFile = "";
+        view.dir = path;
+        view.reload();
+        view.refreshGit();
+        view.suppressHist = false;
+        view.forceActiveFocus();
+    }
+    function closeTab(tid) {
+        view.closeTabMenu();
+        if (fileTabs.count <= 1) { view.leave(); return; }
+        var idx = -1;
+        var closedPath = "";
+        for (var i = 0; i < fileTabs.count; i++) {
+            if (fileTabs.get(i).tid === tid) {
+                idx = i;
+                closedPath = fileTabs.get(i).path;
+                break;
+            }
+        }
+        if (idx < 0) return;
+        var stack = (view.closedTabs || []).slice();
+        stack.unshift(closedPath);
+        if (stack.length > 12) stack = stack.slice(0, 12);
+        view.closedTabs = stack;
+        var wasActive = view.activeTabId === tid;
+        fileTabs.remove(idx);
+        var hb = Object.assign({}, view.histBack);
+        var hf = Object.assign({}, view.histFwd);
+        delete hb[tid];
+        delete hf[tid];
+        view.histBack = hb;
+        view.histFwd = hf;
+        if (wasActive) {
+            var next = fileTabs.get(Math.min(idx, fileTabs.count - 1));
+            view.switchTab(next.tid);
+        }
+    }
+    function closeOtherTabs(tid) {
+        view.closeTabMenu();
+        for (var i = fileTabs.count - 1; i >= 0; i--) {
+            if (fileTabs.get(i).tid !== tid) view.closeTab(fileTabs.get(i).tid);
+        }
+    }
+    function closeTabsToRight(tid) {
+        view.closeTabMenu();
+        var seen = false;
+        for (var i = 0; i < fileTabs.count; ) {
+            if (fileTabs.get(i).tid === tid) { seen = true; i++; continue; }
+            if (seen) view.closeTab(fileTabs.get(i).tid);
+            else i++;
+        }
+    }
+    function reopenClosedTab() {
+        view.closeTabMenu();
+        var stack = (view.closedTabs || []).slice();
+        if (!stack.length) return;
+        var p = stack.shift();
+        view.closedTabs = stack;
+        view.newTab(p);
+    }
+    function openTabMenu(tid, x, y) {
+        view.tabMenuTid = tid;
+        view.tabMenuX = Math.max(8, Math.min(x, view.width - 200));
+        view.tabMenuY = Math.max(8, Math.min(y, view.height - 160));
+        view.tabMenuOpen = true;
+    }
+    function closeTabMenu() { view.tabMenuOpen = false; view.tabMenuTid = -1; }
+    function navBack() {
+        var back = (view.histBack[view.activeTabId] || []).slice();
+        if (!back.length) return;
+        var prev = back.pop();
+        view.histBack[view.activeTabId] = back;
+        var fwd = (view.histFwd[view.activeTabId] || []).slice();
+        fwd.push(view.dir);
+        view.histFwd[view.activeTabId] = fwd;
+        view.histBack = Object.assign({}, view.histBack);
+        view.histFwd = Object.assign({}, view.histFwd);
+        view.suppressHist = true;
+        view.filter = "";
+        view.dir = prev;
+        view.syncActiveTabPath(prev);
+        view.reload();
+        view.refreshGit();
+        view.suppressHist = false;
+    }
+    function navForward() {
+        var fwd = (view.histFwd[view.activeTabId] || []).slice();
+        if (!fwd.length) return;
+        var next = fwd.pop();
+        view.histFwd[view.activeTabId] = fwd;
+        var back = (view.histBack[view.activeTabId] || []).slice();
+        back.push(view.dir);
+        view.histBack[view.activeTabId] = back;
+        view.histBack = Object.assign({}, view.histBack);
+        view.histFwd = Object.assign({}, view.histFwd);
+        view.suppressHist = true;
+        view.filter = "";
+        view.dir = next;
+        view.syncActiveTabPath(next);
+        view.reload();
+        view.refreshGit();
+        view.suppressHist = false;
+    }
+    function pathSegments() {
+        var d = view.dir === "/" ? "/" : view.dir.replace(/\/+$/, "");
+        if (d === "/") return [{ name: "/", path: "/" }];
+        var parts = d.split("/");
+        var out = [];
+        var acc = "";
+        for (var i = 1; i < parts.length; i++) {
+            if (!parts[i].length) continue;
+            acc += "/" + parts[i];
+            out.push({ name: parts[i], path: acc });
+        }
+        return out;
+    }
+    function startPathEdit() {
+        view.pathEditing = true;
+        view.pathEditText = view.dir;
+        view.pathError = "";
+        view.pathSuggestIndex = 0;
+        pathSuggest.clear();
+        Qt.callLater(function () { pathField.forceActiveFocus(); pathField.selectAll(); });
+        pathCompleteDebounce.restart();
+    }
+    function cancelPathEdit() {
+        view.pathEditing = false;
+        view.pathError = "";
+        pathSuggest.clear();
+        view.forceActiveFocus();
+    }
+    function submitPathEdit() {
+        // se há sugestão selecionada e Tab-like, aceitar dir
+        if (pathSuggest.count > 0 && view.pathSuggestIndex >= 0
+            && view.pathSuggestIndex < pathSuggest.count) {
+            var s = pathSuggest.get(view.pathSuggestIndex);
+            if (s && s.sKind === "dir") {
+                view.pathEditText = s.sPath;
+                pathField.text = s.sPath;
+            }
+        }
+        pResolve.command = ["bash", view.scripts, "resolve", view.dir, view.pathEditText];
+        pResolve.running = false;
+        pResolve.running = true;
+    }
+    function acceptPathSuggest() {
+        if (pathSuggest.count === 0) return false;
+        var i = Math.max(0, Math.min(view.pathSuggestIndex, pathSuggest.count - 1));
+        var s = pathSuggest.get(i);
+        view.pathEditText = s.sPath;
+        pathField.text = s.sPath;
+        pathField.cursorPosition = pathField.text.length;
+        pathCompleteDebounce.restart();
+        return true;
+    }
+    Timer {
+        id: pathCompleteDebounce
+        interval: 120
+        onTriggered: view.fetchPathSuggest()
+    }
+    function fetchPathSuggest() {
+        if (!view.pathEditing) return;
+        pathSuggest.clear();
+        pPathComplete.command = ["bash", view.scripts, "path-complete", view.dir, view.pathEditText];
+        pPathComplete.running = false;
+        pPathComplete.running = true;
+    }
+    Process {
+        id: pPathComplete
+        stdout: SplitParser {
+            onRead: line => {
+                var p = line.trim().split("|");
+                if (p.length < 2) return;
+                if (pathSuggest.count >= 12) return;
+                pathSuggest.append({ sKind: p[0], sPath: p.slice(1).join("|") });
+            }
+        }
+        onRunningChanged: {
+            if (!running) view.pathSuggestIndex = 0;
+        }
+    }
+    Process {
+        id: pResolve
+        stdout: StdioCollector {
+            onStreamFinished: {
+                var p = text.trim();
+                if (!p.length) { view.pathError = "PATH NOT FOUND"; return; }
+                pExists.command = ["bash", view.scripts, "exists", p];
+                pExists.targetPath = p;
+                pExists.running = false;
+                pExists.running = true;
+            }
+        }
+    }
+    Process {
+        id: pExists
+        property string targetPath: ""
+        stdout: StdioCollector {
+            onStreamFinished: {
+                var k = text.trim();
+                if (k === "dir") {
+                    view.pathEditing = false;
+                    view.pathError = "";
+                    pathSuggest.clear();
+                    view.go(pExists.targetPath);
+                    view.forceActiveFocus();
+                } else {
+                    view.pathError = "PATH NOT FOUND";
+                }
+            }
+        }
+    }
+    function copyCurrentPath() {
+        var targets = view.selectedCount > 0 ? view.selectedPaths.slice() : [view.dir];
+        var text = targets.join("\n");
+        run(["sh", "-c", "printf '%s' \"$1\" | wl-copy", "_", text],
+            view.sys.tr("Путь скопирован"));
+    }
+    function openFolderInNewTab(path) {
+        if (!path || !path.length) return;
+        view.newTab(path);
+    }
+    function openTerminalHere(path) {
+        var d = path && path.length ? path : view.dir;
+        // se for ficheiro, usar o parent
+        pTerm.command = ["bash", view.scripts, "terminal-here", d];
+        pTerm.running = false;
+        pTerm.running = true;
+        view.closeMenu();
+        view.say("TERMINAL");
+    }
+    Process { id: pTerm }
+    function openInCode(path) {
+        if (!view.hasCode) return;
+        var p = path && path.length ? path : view.dir;
+        pCode.command = ["bash", view.scripts, "open-code", p];
+        pCode.running = false;
+        pCode.running = true;
+        view.closeMenu();
+        view.say("VS CODE");
+    }
+    Process { id: pCode }
+    function checkCode() {
+        pWhichCode.command = ["bash", view.scripts, "which-code"];
+        pWhichCode.running = false;
+        pWhichCode.running = true;
+    }
+    Process {
+        id: pWhichCode
+        stdout: StdioCollector {
+            onStreamFinished: { view.hasCode = text.trim().length > 0; }
+        }
+    }
+    function refreshGit() {
+        pGit.command = ["bash", view.scripts, "git-brief", view.dir];
+        pGit.running = false;
+        pGit.running = true;
+    }
+    Process {
+        id: pGit
+        stdout: StdioCollector {
+            onStreamFinished: {
+                var t = text.trim();
+                view.gitBrief = (t === "NONE" || !t.length) ? "" : t;
+            }
+        }
+    }
+    readonly property bool gitRepo: view.gitBrief.length > 0
+    function openGitPanel(mode) {
+        view.gitPanelTitle = (mode === "log") ? "GIT LOG --oneline" : "GIT STATUS";
+        gitLines.clear();
+        view.gitPanelOpen = true;
+        view.closeMenu();
+        if (mode === "log") {
+            if (!view.gitRepo) {
+                gitLines.append({ gLine: "(not a git repository)" });
+                return;
+            }
+            pGitList.command = ["bash", view.scripts, "git-log", view.dir];
+        } else {
+            if (!view.gitRepo) {
+                gitLines.append({ gLine: "(not a git repository — use Git Init)" });
+                return;
+            }
+            pGitList.command = ["bash", view.scripts, "git-status-list", view.dir];
+        }
+        pGitList.running = false;
+        pGitList.running = true;
+    }
+    Process {
+        id: pGitList
+        stdout: SplitParser {
+            onRead: line => {
+                var t = line.trimEnd();
+                if (!t.length) return;
+                gitLines.append({ gLine: t });
+            }
+        }
+    }
+    function closeGitPanel() { view.gitPanelOpen = false; }
+    function gitInitHere() {
+        view.closeMenu();
+        pGitInit.command = ["bash", view.scripts, "git-init", view.dir];
+        pGitInit.running = false;
+        pGitInit.running = true;
+    }
+    Process {
+        id: pGitInit
+        stdout: StdioCollector {
+            onStreamFinished: {
+                view.say("✓ GIT INIT");
+                view.refreshGit();
+                view.openGitPanel("status");
+            }
+        }
+    }
+
+    function canPreviewPath(path) {
+        if (!path || !path.length) return false;
+        var base = view.baseName(path);
+        var i = base.lastIndexOf(".");
+        if (i < 0) return false;
+        var ext = base.substring(i + 1).toLowerCase();
+        var ok = ["txt","md","json","yaml","yml","toml","py","js","ts","tsx","jsx","sh","bash","zsh",
+                  "css","html","htm","xml","ini","conf","cfg","rs","go","c","h","cpp","hpp","java",
+                  "qml","lua","rb","php","sql","env","log","csv",
+                  "png","jpg","jpeg","gif","webp","bmp","svg"];
+        return ok.indexOf(ext) >= 0;
+    }
+    function togglePreview(path) {
+        var p = path && path.length ? path : view.currentPath();
+        if (!p.length) return;
+        if (view.previewOpen && view.previewPath === p) {
+            view.closePreview();
+            return;
+        }
+        view.openPreview(p);
+    }
+    function openPreview(path) {
+        if (!path || !path.length) return;
+        view.previewPath = path;
+        view.previewKind = "";
+        view.previewText = "";
+        view.previewMeta = "READING…";
+        view.previewError = "";
+        view.previewOpen = true;
+        pPreview.command = ["bash", view.scripts, "preview", path];
+        pPreview.running = false;
+        pPreview.running = true;
+    }
+    function closePreview() {
+        view.previewOpen = false;
+        view.previewPath = "";
+        view.previewKind = "";
+        view.previewText = "";
+        view.previewMeta = "";
+        view.previewError = "";
+    }
+    Process {
+        id: pPreview
+        stdout: StdioCollector {
+            onStreamFinished: {
+                var kind = "";
+                var meta = [];
+                var err = "";
+                var content = "";
+                var inContent = false;
+                var lines = text.split("\n");
+                for (var i = 0; i < lines.length; i++) {
+                    var line = lines[i];
+                    if (inContent) {
+                        if (line.indexOf("content_end\t") === 0) { inContent = false; continue; }
+                        content += (content.length ? "\n" : "") + line;
+                        continue;
+                    }
+                    var t = line.split("\t");
+                    if (t.length < 2) continue;
+                    var k = t[0];
+                    var v = t.slice(1).join("\t");
+                    if (k === "content_begin") { inContent = true; continue; }
+                    if (k === "preview_kind") kind = v;
+                    else if (k === "error") err = v;
+                    else if (k === "kind") meta.push(v);
+                    else if (k === "size_human") meta.push(v);
+                    else if (k === "lines") meta.push(v + " lines");
+                    else if (k === "resolution") meta.push(v);
+                }
+                view.previewKind = kind;
+                view.previewMeta = meta.join(" · ");
+                view.previewError = err;
+                view.previewText = content;
+            }
+        }
+    }
+
+    function loadFavorites() {
+        favPlaces.clear();
+        pFav.command = ["bash", view.scripts, "favorites-list"];
+        pFav.running = false;
+        pFav.running = true;
+    }
+    Process {
+        id: pFav
+        stdout: SplitParser {
+            onRead: line => {
+                var p = line.trim().split("|");
+                if (p.length < 2) return;
+                favPlaces.append({ fPath: p[0], fName: p.slice(1).join("|") });
+            }
+        }
+    }
+    function loadRecent() {
+        recentPlaces.clear();
+        pRecent.command = ["bash", view.scripts, "recent-list"];
+        pRecent.running = false;
+        pRecent.running = true;
+    }
+    Process {
+        id: pRecent
+        stdout: SplitParser {
+            onRead: line => {
+                var p = line.trim();
+                if (!p.length) return;
+                recentPlaces.append({ rPath: p, rName: view.tabLabel(p) });
+            }
+        }
+    }
+    function pushRecent(path) {
+        pRecentPush.command = ["bash", view.scripts, "recent-push", path];
+        pRecentPush.running = false;
+        pRecentPush.running = true;
+    }
+    Process {
+        id: pRecentPush
+        onExited: view.loadRecent()
+    }
+    function addFavorite(path) {
+        if (!path || !path.length) path = view.dir;
+        run(["bash", view.scripts, "favorites-add", path, view.tabLabel(path)], "★");
+        view.closeMenu();
+        Qt.callLater(view.loadFavorites);
+    }
+    function removeFavorite(path) {
+        run(["bash", view.scripts, "favorites-remove", path], "✓");
+        Qt.callLater(view.loadFavorites);
+    }
+    function isCutPath(path) {
+        return view.clipMode === "cut" && view.clipPaths.indexOf(path) >= 0;
+    }
+    function isCopiedPath(path) {
+        return view.clipMode === "copy" && view.clipPaths.indexOf(path) >= 0;
     }
 
     // что умеет показать наш плеер — открываем сразу, без вопроса «чем»
@@ -512,12 +1209,22 @@ Item {
         view.menuPath = path;
         view.menuIsDir = isDir;
         view.menuKind = kind !== undefined ? kind : (path.length ? "file" : "folder");
-        // держим меню внутри панели, иначе его срежет капсула
-        view.menuX = Math.max(0, Math.min(x, view.width - 210));
-        view.menuY = Math.max(0, Math.min(y, Math.max(0, view.height - 250)));
+        // por omissão: secções fechadas (menu curto)
+        view.menuSecOpen = false;
+        view.menuSecEdit = false;
+        view.menuSecCreate = false;
+        view.menuSecGit = false;
+        view.menuX = Math.max(0, Math.min(x, view.width - 248));
+        view.menuY = Math.max(0, Math.min(y, Math.max(0, view.height - 280)));
         view.menuOpen = true;
     }
     function closeMenu() { view.menuOpen = false; }
+    function toggleMenuSec(name) {
+        if (name === "open") view.menuSecOpen = !view.menuSecOpen;
+        else if (name === "edit") view.menuSecEdit = !view.menuSecEdit;
+        else if (name === "create") view.menuSecCreate = !view.menuSecCreate;
+        else if (name === "git") view.menuSecGit = !view.menuSecGit;
+    }
 
     function doOpen(path) {
         if (!path.length) return;
@@ -692,11 +1399,23 @@ Item {
         if (!view.clipPaths.length) return;
         var op = view.clipMode === "cut" ? "move" : "copy";
         closeMenu();
+        var dest = view.dir;
+        if (view.selectedCount === 1) {
+            var sp = view.selectedPaths[0];
+            for (var i = 0; i < entries.count; i++) {
+                if (view.fullPath(entries.get(i).eName) === sp && entries.get(i).eType === "d") {
+                    dest = sp;
+                    break;
+                }
+            }
+        } else if (view.menuPath.length && view.menuIsDir) {
+            dest = view.menuPath;
+        }
         var label = view.clipPaths.length === 1 ? view.baseName(view.clipPaths[0])
                                                : (view.clipPaths.length + " " + view.sys.tr("файлов"));
         var note = (view.clipMode === "cut" ? view.sys.tr("Перемещено: ")
                                             : view.sys.tr("Вставлено: ")) + label;
-        var cmd = ["sh", "-c", view.scripts + " " + op + " \"$1\" \"keepboth\" \"${@:2}\"", "_", view.dir];
+        var cmd = ["sh", "-c", view.scripts + " " + op + " \"$1\" \"keepboth\" \"${@:2}\"", "_", dest];
         cmd = cmd.concat(view.clipPaths);
         runLong(cmd, note, label);
         if (view.clipMode === "cut") { view.clipPaths = []; view.clipMode = ""; }
@@ -704,8 +1423,8 @@ Item {
     function doCopyPath(path) {
         var targets = (view.selectedCount > 1 && (path === "" || view.isSelected(path)))
                     ? view.selectedPaths.slice()
-                    : (path ? [path] : []);
-        if (!targets.length) return;
+                    : (path ? [path] : (view.selectedCount > 0 ? view.selectedPaths.slice() : [view.dir]));
+        if (!targets.length) targets = [view.dir];
         closeMenu();
         var text = targets.join("\n");
         run(["sh", "-c", "printf '%s' \"$1\" | wl-copy", "_", text],
@@ -772,6 +1491,13 @@ Item {
         dialogField.selectAll();
         dialogFocus.restart();
     }
+    function startNewFile() {
+        closeMenu();
+        view.dialogMode = "newfile";
+        dialogField.text = "untitled.txt";
+        dialogField.selectAll();
+        dialogFocus.restart();
+    }
     function confirmDialog() {
         var name = dialogField.text.trim();
         var mode = view.dialogMode;
@@ -784,6 +1510,9 @@ Item {
         else if (mode === "mkdir")
             run(["sh", "-c", view.scripts + " mkdir \"$1\" \"$2\"", "_", view.dir, name],
                 view.sys.tr("Папка создана"));
+        else if (mode === "newfile")
+            run(["sh", "-c", view.scripts + " touch \"$1\" \"$2\"", "_", view.dir, name],
+                "✓ CREATED");
     }
     function cancelDialog() {
         view.dialogMode = "";
@@ -793,7 +1522,13 @@ Item {
 
     // -------------------------------------------------------------- клавиши
     Keys.onEscapePressed: {
+        if (view.trashConfirmOpen) { view.cancelTrashConfirm(); return; }
+        if (view.gitPanelOpen) { view.closeGitPanel(); return; }
+        if (view.previewOpen) { view.closePreview(); return; }
+        if (view.tabMenuOpen) { view.closeTabMenu(); return; }
+        if (view.pathEditing) { view.cancelPathEdit(); return; }
         if (view.dialogMode.length) { view.cancelDialog(); return; }
+        if (view.propsOpen) { view.propsOpen = false; return; }
         if (view.menuOpen) { view.closeMenu(); return; }
         if (view.selectedCount > 0) { view.clearSelection(); return; }
         if (view.openWithFile.length) { view.openWithFile = ""; return; }
@@ -833,6 +1568,12 @@ Item {
             return;
         }
         if (event.key === Qt.Key_Delete) {
+            if (event.modifiers & Qt.ShiftModifier) {
+                if (view.selectedCount > 0) view.askDeletePermanent("");
+                else if (view.currentPath().length) view.askDeletePermanent(view.currentPath());
+                event.accepted = true;
+                return;
+            }
             if (view.selectedCount > 0) {
                 view.doTrash("");
             } else {
@@ -841,13 +1582,51 @@ Item {
             event.accepted = true;
             return;
         }
+        if (event.key === Qt.Key_Space) {
+            var sp = view.currentPath();
+            if (sp.length && view.canPreviewPath(sp)) {
+                view.togglePreview(sp);
+                event.accepted = true;
+                return;
+            }
+        }
         if (event.modifiers & Qt.ControlModifier) {
             if (event.key === Qt.Key_A) { view.selectAll(); event.accepted = true; return; }
             var p = view.currentPath();
-            if (event.key === Qt.Key_C) { view.doCopy(p); event.accepted = true; return; }
+            if (event.key === Qt.Key_C) {
+                if (event.modifiers & Qt.ShiftModifier) {
+                    view.copyCurrentPath();
+                    event.accepted = true;
+                    return;
+                }
+                view.doCopy(p); event.accepted = true; return;
+            }
             if (event.key === Qt.Key_X) { view.doCut(p); event.accepted = true; return; }
             if (event.key === Qt.Key_V) { view.doPaste(); event.accepted = true; return; }
             if (event.key === Qt.Key_N) { view.startMkdir(); event.accepted = true; return; }
+            if (event.key === Qt.Key_T) {
+                if (event.modifiers & Qt.ShiftModifier) view.reopenClosedTab();
+                else view.newTab(Quickshell.env("HOME"));
+                event.accepted = true; return;
+            }
+            if (event.key === Qt.Key_W) { view.closeTab(view.activeTabId); event.accepted = true; return; }
+            if (event.key === Qt.Key_L) { view.startPathEdit(); event.accepted = true; return; }
+            if (event.key === Qt.Key_G) {
+                if (event.modifiers & Qt.ShiftModifier) view.openGitPanel("log");
+                else view.openGitPanel("status");
+                event.accepted = true;
+                return;
+            }
+            return;
+        }
+        if (event.modifiers & Qt.AltModifier) {
+            if (event.key === Qt.Key_Left) { view.navBack(); event.accepted = true; return; }
+            if (event.key === Qt.Key_Right) { view.navForward(); event.accepted = true; return; }
+        }
+        if (event.key === Qt.Key_F5) {
+            view.reload();
+            view.say("READY");
+            event.accepted = true;
             return;
         }
         if (event.key === Qt.Key_F2) {
@@ -856,6 +1635,7 @@ Item {
             event.accepted = true;
             return;
         }
+        if (view.pathEditing) return;
         if (event.text.length === 1 && event.text >= " ") {
             view.filter += event.text;
             applyFilter();
@@ -894,8 +1674,10 @@ Item {
         property bool enabledItem: true
         signal chosen()
 
-        width: parent ? parent.width : 0
-        height: 34
+        Layout.fillWidth: true
+        Layout.preferredHeight: visible ? 34 : 0
+        Layout.maximumHeight: visible ? 34 : 0
+        implicitHeight: 34
         radius: 9
         color: itemMa.containsMouse && enabledItem
                ? (danger ? Qt.rgba(0.94, 0.27, 0.27, 0.18) : view.sys.colHover)
@@ -903,22 +1685,22 @@ Item {
         opacity: enabledItem ? 1 : 0.35
         Behavior on color { ColorAnimation { duration: 110 } }
 
-        Row {
-            anchors.verticalCenter: parent.verticalCenter
-            anchors.left: parent.left
+        RowLayout {
+            anchors.fill: parent
             anchors.leftMargin: 11
+            anchors.rightMargin: 11
             spacing: 10
 
             Text {
-                anchors.verticalCenter: parent.verticalCenter
-                text: parent.parent.glyph
-                color: parent.parent.danger ? view.sys.colCrit : view.sys.colMuted
+                text: glyph
+                color: danger ? view.sys.colCrit : view.sys.colMuted
                 font { family: view.sys.fontFam; pixelSize: 14 }
             }
             Text {
-                anchors.verticalCenter: parent.verticalCenter
-                text: parent.parent.label
-                color: parent.parent.danger ? view.sys.colCrit : view.sys.colFg
+                Layout.fillWidth: true
+                text: label
+                elide: Text.ElideRight
+                color: danger ? view.sys.colCrit : view.sys.colFg
                 font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2 }
             }
         }
@@ -930,6 +1712,52 @@ Item {
             enabled: parent.enabledItem
             cursorShape: Qt.PointingHandCursor
             onClicked: parent.chosen()
+        }
+    }
+
+    component MenuSectionHead: Rectangle {
+        property string title: ""
+        property bool expanded: false
+        property bool sectionVisible: true
+        signal toggled()
+
+        Layout.fillWidth: true
+        Layout.preferredHeight: visible ? 28 : 0
+        Layout.maximumHeight: visible ? 28 : 0
+        visible: sectionVisible
+        implicitHeight: 28
+        radius: 8
+        color: headMa.containsMouse ? Qt.rgba(1, 1, 1, 0.06) : "transparent"
+        Behavior on color { ColorAnimation { duration: 100 } }
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 8
+            anchors.rightMargin: 8
+            spacing: 6
+            Text {
+                text: expanded ? "▾" : "▸"
+                color: view.sys.colMuted
+                font { family: view.sys.fontFam; pixelSize: 11 }
+            }
+            Text {
+                Layout.fillWidth: true
+                text: title
+                color: view.sys.colMuted
+                font {
+                    family: view.sys.fontFam
+                    pixelSize: 10
+                    letterSpacing: 1.2
+                    bold: true
+                }
+            }
+        }
+        MouseArea {
+            id: headMa
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: parent.toggled()
         }
     }
 
@@ -1113,6 +1941,132 @@ Item {
         height: view.windowMode ? view.height : col.implicitHeight
         spacing: 12
 
+        // ------------------------------------------------------- abas FM 2.0
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 4
+            visible: !view.openWithFile.length
+
+            Flickable {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 30
+                contentWidth: tabsRow.implicitWidth
+                clip: true
+                interactive: contentWidth > width
+                Row {
+                    id: tabsRow
+                    spacing: 4
+                    Repeater {
+                        model: fileTabs
+                        delegate: Rectangle {
+                            id: tabChip
+                            required property var model
+                            readonly property int tid: model.tid
+                            readonly property string path: model.path
+                            readonly property string label: model.label
+                            readonly property bool on: tid === view.activeTabId
+                            width: Math.min(140, tabLbl.implicitWidth + 36)
+                            height: 28
+                            radius: 9
+                            color: on ? Qt.rgba(1, 1, 1, 0.10)
+                                 : (tabMa.containsMouse ? Qt.rgba(1, 1, 1, 0.06) : "transparent")
+                            border.color: on ? view.sys.colLine : "transparent"
+                            border.width: 1
+                            Behavior on color { ColorAnimation { duration: 120 } }
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 8
+                                anchors.rightMargin: 4
+                                spacing: 2
+                                Text {
+                                    id: tabLbl
+                                    Layout.fillWidth: true
+                                    text: tabChip.label
+                                    elide: Text.ElideRight
+                                    color: tabChip.on ? view.sys.colFg : view.sys.colMuted
+                                    font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 3 }
+                                }
+                                Text {
+                                    visible: fileTabs.count > 1
+                                    text: "×"
+                                    color: closeMa.containsMouse ? view.sys.colFg : Qt.rgba(1, 1, 1, 0.35)
+                                    font { family: view.sys.fontFam; pixelSize: 14 }
+                                    MouseArea {
+                                        id: closeMa
+                                        anchors.fill: parent
+                                        anchors.margins: -4
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: view.closeTab(tabChip.tid)
+                                    }
+                                }
+                            }
+                            ToolTip.visible: tabMa.containsMouse
+                            ToolTip.delay: 400
+                            ToolTip.text: tabChip.path
+                            MouseArea {
+                                id: tabMa
+                                anchors.fill: parent
+                                anchors.rightMargin: fileTabs.count > 1 ? 18 : 0
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+                                onClicked: mouse => {
+                                    if (mouse.button === Qt.MiddleButton) {
+                                        view.closeTab(tabChip.tid);
+                                        return;
+                                    }
+                                    if (mouse.button === Qt.RightButton) {
+                                        var pos = mapToItem(view, mouse.x, mouse.y);
+                                        view.openTabMenu(tabChip.tid, pos.x, pos.y);
+                                        return;
+                                    }
+                                    view.switchTab(tabChip.tid);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                Layout.preferredWidth: 28
+                Layout.preferredHeight: 28
+                radius: 9
+                color: plusMa.containsMouse ? Qt.rgba(1, 1, 1, 0.10) : Qt.rgba(1, 1, 1, 0.05)
+                border.color: view.sys.colLine
+                border.width: 1
+                Text {
+                    anchors.centerIn: parent
+                    text: "+"
+                    color: view.sys.colMuted
+                    font { family: view.sys.fontFam; pixelSize: 16 }
+                }
+                MouseArea {
+                    id: plusMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: view.newTab(Quickshell.env("HOME"))
+                }
+            }
+
+            Text {
+                text: view.gitBrief.length > 0 ? ("GIT · " + view.gitBrief) : "GIT"
+                color: gitBadgeMa.containsMouse ? view.sys.colOn : view.sys.colMuted
+                font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 4 }
+                MouseArea {
+                    id: gitBadgeMa
+                    anchors.fill: parent
+                    anchors.margins: -4
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: view.openGitPanel("status")
+                }
+            }
+        }
+
         // ------------------------------------------------------- шапка
         RowLayout {
             Layout.fillWidth: true
@@ -1144,22 +2098,197 @@ Item {
 
             ColumnLayout {
                 Layout.fillWidth: true
-                spacing: 0
-                Text {
-                    text: view.dir === Quickshell.env("HOME")
-                          ? view.sys.tr("Домашняя") : view.dir.split("/").pop() || "/"
-                    color: view.sys.colFg
-                    font { family: view.sys.fontFam; pixelSize: view.sys.fontSize + 5; bold: true }
+                spacing: 2
+                visible: !view.pathEditing
+
+                // breadcrumb clicável
+                Flickable {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 22
+                    contentWidth: crumbRow.implicitWidth
+                    clip: true
+                    interactive: contentWidth > width
+                    Row {
+                        id: crumbRow
+                        spacing: 2
+                        Text {
+                            text: "/"
+                            color: rootCrumbMa.containsMouse ? view.sys.colOn : view.sys.colMuted
+                            font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2; bold: true }
+                            MouseArea {
+                                id: rootCrumbMa
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: view.go("/")
+                            }
+                        }
+                        Repeater {
+                            model: view.pathSegments()
+                            delegate: Row {
+                                required property var modelData
+                                spacing: 2
+                                Text {
+                                    text: "›"
+                                    color: Qt.rgba(1, 1, 1, 0.25)
+                                    font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2 }
+                                }
+                                Text {
+                                    text: modelData.name
+                                    color: segMa.containsMouse ? view.sys.colOn : view.sys.colFg
+                                    font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 1; bold: true }
+                                    MouseArea {
+                                        id: segMa
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: view.go(modelData.path)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
+
                 Text {
                     Layout.fillWidth: true
                     text: view.sys.wallpaperFolderPickMode
                           ? view.sys.tr("Выберите папку с обоями")
-                          : (view.status.length ? view.status : view.dir)
+                          : (view.status.length ? view.status
+                             : (view.pathError.length ? view.pathError : view.dir))
                     color: view.sys.wallpaperFolderPickMode || view.status.length
-                           ? view.sys.colOn : view.sys.colMuted
+                           ? view.sys.colOn
+                           : (view.pathError.length ? view.sys.colWarn : view.sys.colMuted)
                     elide: Text.ElideMiddle
                     font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 3 }
+                    MouseArea {
+                        anchors.fill: parent
+                        acceptedButtons: Qt.LeftButton
+                        onDoubleClicked: view.startPathEdit()
+                    }
+                }
+            }
+
+            // path edit (Ctrl+L)
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.preferredHeight: 40
+                radius: 13
+                visible: view.pathEditing
+                color: Qt.rgba(1, 1, 1, 0.06)
+                border.color: view.pathError.length ? view.sys.colWarn : view.sys.colOn
+                border.width: 1
+                TextField {
+                    id: pathField
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 12
+                    text: view.pathEditText
+                    onTextChanged: {
+                        view.pathEditText = text;
+                        if (view.pathEditing) pathCompleteDebounce.restart();
+                    }
+                    color: view.sys.colFg
+                    selectedTextColor: view.sys.colBg
+                    selectionColor: view.sys.colOn
+                    background: Item {}
+                    font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 1 }
+                    Keys.onEscapePressed: view.cancelPathEdit()
+                    Keys.onReturnPressed: view.submitPathEdit()
+                    Keys.onEnterPressed: view.submitPathEdit()
+                    Keys.onDownPressed: {
+                        if (pathSuggest.count > 0)
+                            view.pathSuggestIndex = Math.min(pathSuggest.count - 1, view.pathSuggestIndex + 1);
+                    }
+                    Keys.onUpPressed: {
+                        if (pathSuggest.count > 0)
+                            view.pathSuggestIndex = Math.max(0, view.pathSuggestIndex - 1);
+                    }
+                    Keys.onTabPressed: {
+                        if (view.acceptPathSuggest()) event.accepted = true;
+                    }
+                }
+
+                // autocomplete dropdown
+                Rectangle {
+                    visible: view.pathEditing && pathSuggest.count > 0
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.top: parent.bottom
+                    anchors.topMargin: 4
+                    z: 50
+                    height: Math.min(180, pathSuggestCol.implicitHeight + 8)
+                    radius: 12
+                    color: Qt.rgba(0.05, 0.05, 0.06, 0.98)
+                    border.color: view.sys.colLine
+                    border.width: 1
+                    clip: true
+                    Column {
+                        id: pathSuggestCol
+                        anchors.fill: parent
+                        anchors.margins: 4
+                        spacing: 1
+                        Repeater {
+                            model: pathSuggest
+                            delegate: Rectangle {
+                                required property var model
+                                required property int index
+                                width: pathSuggestCol.width
+                                height: 26
+                                radius: 8
+                                color: index === view.pathSuggestIndex
+                                       ? Qt.rgba(1, 1, 1, 0.10) : "transparent"
+                                Text {
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: 8
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 8
+                                    text: (model.sKind === "dir" ? "▸ " : "  ") + model.sPath
+                                    elide: Text.ElideMiddle
+                                    color: index === view.pathSuggestIndex
+                                           ? view.sys.colFg : view.sys.colMuted
+                                    font { family: view.sys.fontFam; pixelSize: 11 }
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    onEntered: view.pathSuggestIndex = index
+                                    onClicked: {
+                                        view.pathSuggestIndex = index;
+                                        view.acceptPathSuggest();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // copy path
+            Rectangle {
+                visible: !view.pathEditing && !view.sys.wallpaperFolderPickMode
+                Layout.preferredWidth: 40
+                Layout.preferredHeight: 40
+                radius: 13
+                color: copyPathMa.containsMouse ? view.sys.colHover : Qt.rgba(1, 1, 1, 0.05)
+                border.color: view.sys.colLine
+                border.width: 1
+                Text {
+                    anchors.centerIn: parent
+                    text: String.fromCodePoint(0xF018F)
+                    color: view.sys.colMuted
+                    font { family: view.sys.fontFam; pixelSize: 15 }
+                }
+                ToolTip.visible: copyPathMa.containsMouse
+                ToolTip.text: "COPY PATH"
+                ToolTip.delay: 350
+                MouseArea {
+                    id: copyPathMa
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: view.copyCurrentPath()
                 }
             }
 
@@ -1375,6 +2504,110 @@ Item {
                     }
                 }
 
+                // Favorites
+                Text {
+                    visible: favPlaces.count > 0
+                    Layout.topMargin: 8
+                    Layout.leftMargin: 10
+                    text: "FAVORITES"
+                    color: Qt.rgba(1, 1, 1, 0.28)
+                    font { family: view.sys.fontFam; pixelSize: 10; letterSpacing: 1 }
+                }
+                Repeater {
+                    model: favPlaces
+                    Rectangle {
+                        id: fav
+                        required property var model
+                        readonly property bool active: view.dir === fav.model.fPath
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 34
+                        radius: 10
+                        color: favMa.containsMouse ? view.sys.colHover
+                             : (fav.active ? Qt.rgba(1, 1, 1, 0.07) : "transparent")
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            spacing: 8
+                            Text {
+                                text: "★"
+                                color: fav.active ? view.sys.colOn : view.sys.colMuted
+                                font { family: view.sys.fontFam; pixelSize: 12 }
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: fav.model.fName
+                                elide: Text.ElideRight
+                                color: fav.active ? view.sys.colFg : view.sys.colMuted
+                                font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2 }
+                            }
+                        }
+                        MouseArea {
+                            id: favMa
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+                            onClicked: mouse => {
+                                if (mouse.button === Qt.MiddleButton) {
+                                    view.openFolderInNewTab(fav.model.fPath);
+                                    return;
+                                }
+                                if (mouse.button === Qt.RightButton) {
+                                    view.removeFavorite(fav.model.fPath);
+                                    return;
+                                }
+                                view.go(fav.model.fPath);
+                            }
+                        }
+                    }
+                }
+
+                // Recent
+                Text {
+                    visible: recentPlaces.count > 0
+                    Layout.topMargin: 8
+                    Layout.leftMargin: 10
+                    text: "RECENT"
+                    color: Qt.rgba(1, 1, 1, 0.28)
+                    font { family: view.sys.fontFam; pixelSize: 10; letterSpacing: 1 }
+                }
+                Repeater {
+                    model: recentPlaces
+                    Rectangle {
+                        id: rec
+                        required property var model
+                        readonly property bool active: view.dir === rec.model.rPath
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: 30
+                        radius: 10
+                        color: recMa.containsMouse ? view.sys.colHover : "transparent"
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.left: parent.left
+                            anchors.leftMargin: 10
+                            anchors.right: parent.right
+                            anchors.rightMargin: 8
+                            text: rec.model.rName
+                            elide: Text.ElideMiddle
+                            color: rec.active ? view.sys.colFg : view.sys.colMuted
+                            font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 3 }
+                        }
+                        MouseArea {
+                            id: recMa
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+                            onClicked: mouse => {
+                                if (mouse.button === Qt.MiddleButton)
+                                    view.openFolderInNewTab(rec.model.rPath);
+                                else
+                                    view.go(rec.model.rPath);
+                            }
+                        }
+                    }
+                }
+
                 // ------------------------------------------- носители
                 DiskSection {
                     title: view.sys.tr("Диски")
@@ -1398,6 +2631,14 @@ Item {
                 spacing: 1
 
                 // ---------------------------------------------- сортировка
+                Text {
+                    Layout.fillWidth: true
+                    visible: view.listTotal > view.listShown && view.listShown > 0
+                    text: "SHOWING " + view.listShown + " / " + view.listTotal
+                          + " · type to filter"
+                    color: view.sys.colWarn
+                    font { family: view.sys.fontFam; pixelSize: 10 }
+                }
                 RowLayout {
                     Layout.fillWidth: true
                     Layout.bottomMargin: 4
@@ -1692,6 +2933,20 @@ Item {
                                     : row.isSelected ? view.sys.colOn
                                     : "transparent"
                         border.width: (row.dropTarget || row.isSelected) ? 1 : 0
+                        opacity: view.isCutPath(view.fullPath(row.model.eName)) ? 0.42
+                               : (view.isCopiedPath(view.fullPath(row.model.eName)) ? 0.78 : 1)
+                        Behavior on opacity { NumberAnimation { duration: 140 } }
+
+                        Text {
+                            anchors.right: parent.right
+                            anchors.rightMargin: 14
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: row.dropTarget
+                            z: 5
+                            text: "DROP HERE"
+                            color: view.sys.colOn
+                            font { family: view.sys.fontFam; pixelSize: 10; letterSpacing: 1 }
+                        }
 
                         // Папку можно выбрать курсором: бросили на строку —
                         // кладём внутрь неё, а не в открытый каталог.
@@ -1749,7 +3004,7 @@ Item {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
 
                             property bool dragging: false
                             property real pressX: 0
@@ -1775,6 +3030,10 @@ Item {
                                 var p = view.fullPath(row.model.eName);
                                 view.current = row.index;
                                 view.forceActiveFocus();
+                                if (mouse.button === Qt.MiddleButton) {
+                                    if (row.model.eType === "d") view.openFolderInNewTab(p);
+                                    return;
+                                }
                                 if (mouse.button === Qt.RightButton) {
                                     if (!view.isSelected(p)) {
                                         view.selectSingle(p, row.index);
@@ -1929,6 +3188,20 @@ Item {
                                     : tile.isSelected ? view.sys.colOn
                                     : "transparent"
                         border.width: (tile.dropTarget || tile.isSelected) ? 1 : 0
+                        opacity: view.isCutPath(view.fullPath(tile.model.eName)) ? 0.42
+                               : (view.isCopiedPath(view.fullPath(tile.model.eName)) ? 0.78 : 1)
+                        Behavior on opacity { NumberAnimation { duration: 140 } }
+
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            anchors.bottom: parent.bottom
+                            anchors.bottomMargin: 6
+                            visible: tile.dropTarget
+                            z: 5
+                            text: "DROP HERE"
+                            color: view.sys.colOn
+                            font { family: view.sys.fontFam; pixelSize: 9; letterSpacing: 1 }
+                        }
 
                         DropArea {
                             id: tileDrop
@@ -1978,7 +3251,7 @@ Item {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
 
                             property bool dragging: false
                             property real pressX: 0
@@ -2002,6 +3275,10 @@ Item {
                                 var p = view.fullPath(tile.model.eName);
                                 view.current = tile.index;
                                 view.forceActiveFocus();
+                                if (mouse.button === Qt.MiddleButton) {
+                                    if (tile.model.eType === "d") view.openFolderInNewTab(p);
+                                    return;
+                                }
                                 if (mouse.button === Qt.RightButton) {
                                     if (!view.isSelected(p)) {
                                         view.selectSingle(p, tile.index);
@@ -2498,9 +3775,53 @@ Item {
     MouseArea {
         anchors.fill: parent
         z: 90
-        visible: view.menuOpen
+        visible: view.menuOpen || view.tabMenuOpen
         acceptedButtons: Qt.LeftButton | Qt.RightButton
-        onClicked: view.closeMenu()
+        onClicked: {
+            view.closeMenu();
+            view.closeTabMenu();
+        }
+    }
+
+    // menu de abas
+    Rectangle {
+        z: 92
+        visible: view.tabMenuOpen
+        x: view.tabMenuX
+        y: view.tabMenuY
+        width: 200
+        height: tabMenuCol.implicitHeight + 12
+        radius: 14
+        color: Qt.rgba(0.04, 0.04, 0.05, 0.98)
+        border.color: view.sys.colLine
+        border.width: 1
+        ColumnLayout {
+            id: tabMenuCol
+            anchors.fill: parent
+            anchors.margins: 6
+            spacing: 1
+            MenuItem {
+                glyph: ""
+                label: "Close"
+                onChosen: view.closeTab(view.tabMenuTid)
+            }
+            MenuItem {
+                glyph: ""
+                label: "Close Others"
+                onChosen: view.closeOtherTabs(view.tabMenuTid)
+            }
+            MenuItem {
+                glyph: ""
+                label: "Close to Right"
+                onChosen: view.closeTabsToRight(view.tabMenuTid)
+            }
+            MenuItem {
+                glyph: ""
+                label: "Reopen Closed Tab"
+                enabledItem: view.closedTabs.length > 0
+                onChosen: view.reopenClosedTab()
+            }
+        }
     }
 
     Rectangle {
@@ -2509,7 +3830,7 @@ Item {
         visible: view.menuOpen
         x: view.menuX
         y: view.menuY
-        width: 220
+        width: 248
         height: menuCol.implicitHeight + 12
         radius: 14
         color: Qt.rgba(0.04, 0.04, 0.05, 0.98)
@@ -2528,65 +3849,100 @@ Item {
             anchors.margins: 6
             spacing: 1
 
-            // ---- меню для файла или папки
+            // ========== OPEN ==========
+            MenuSectionHead {
+                visible: view.menuKind !== "trash"
+                title: "OPEN"
+                expanded: view.menuSecOpen
+                onToggled: view.toggleMenuSec("open")
+            }
             MenuItem {
-                visible: view.menuPath.length > 0 && view.selectedCount <= 1
+                visible: view.menuSecOpen && view.menuKind !== "trash"
+                         && view.menuPath.length > 0 && view.selectedCount <= 1
                 glyph: String.fromCodePoint(0xF0770)
                 label: view.menuIsDir ? view.sys.tr("Открыть папку") : view.sys.tr("Открыть")
                 onChosen: view.doOpen(view.menuPath)
             }
             MenuItem {
-                visible: view.menuPath.length > 0 && !view.menuIsDir && view.selectedCount <= 1
+                visible: view.menuSecOpen && view.menuKind !== "trash"
+                         && view.menuPath.length > 0 && view.menuIsDir && view.selectedCount <= 1
+                glyph: String.fromCodePoint(0xF0334)
+                label: "Open in New Tab"
+                onChosen: { view.closeMenu(); view.openFolderInNewTab(view.menuPath); }
+            }
+            MenuItem {
+                visible: view.menuSecOpen && view.menuKind !== "trash"
+                         && view.menuPath.length > 0 && view.selectedCount <= 1 && view.canPreviewPath(view.menuPath)
+                glyph: String.fromCodePoint(0xF033A)
+                label: "Preview"
+                onChosen: { view.closeMenu(); view.openPreview(view.menuPath); }
+            }
+            MenuItem {
+                visible: view.menuSecOpen && view.menuKind !== "trash"
+                         && view.menuPath.length > 0 && !view.menuIsDir && view.selectedCount <= 1
                 glyph: String.fromCodePoint(0xF03CB)
                 label: view.sys.tr("Открыть с помощью…")
                 onChosen: view.doOpenWith(view.menuPath)
             }
-
-            // ---- меню для архивов
             MenuItem {
-                visible: view.menuPath.length > 0 && !view.menuIsDir && view.isArchive(view.menuPath) && view.selectedCount <= 1
+                visible: view.menuSecOpen && view.menuKind !== "trash"
+                glyph: String.fromCodePoint(0xF07B7)
+                label: "Open Terminal Here"
+                onChosen: view.openTerminalHere(view.menuIsDir && view.menuPath.length ? view.menuPath : view.dir)
+            }
+            MenuItem {
+                visible: view.menuSecOpen && view.menuKind !== "trash" && view.hasCode
+                glyph: String.fromCodePoint(0xF05A2)
+                label: "Open in VS Code"
+                onChosen: view.openInCode(view.menuPath.length ? view.menuPath : view.dir)
+            }
+            MenuItem {
+                visible: view.menuSecOpen && view.menuKind !== "trash"
+                         && view.menuPath.length > 0 && !view.menuIsDir && view.isArchive(view.menuPath) && view.selectedCount <= 1
                 glyph: String.fromCodePoint(0xF05C0)
                 label: view.sys.tr("Распаковать сюда")
                 onChosen: view.doExtractHere(view.menuPath)
             }
             MenuItem {
-                visible: view.menuPath.length > 0 && !view.menuIsDir && view.isArchive(view.menuPath) && view.selectedCount <= 1
+                visible: view.menuSecOpen && view.menuKind !== "trash"
+                         && view.menuPath.length > 0 && !view.menuIsDir && view.isArchive(view.menuPath) && view.selectedCount <= 1
                 glyph: String.fromCodePoint(0xF024B)
                 label: view.sys.tr("Распаковать в ") + view.archiveFolderName(view.menuPath) + "/"
                 onChosen: view.doExtractToFolder(view.menuPath)
             }
             MenuItem {
-                visible: view.selectedCount > 1 && view.hasArchiveSelected()
+                visible: view.menuSecOpen && view.menuKind !== "trash"
+                         && view.selectedCount > 1 && view.hasArchiveSelected()
                 glyph: String.fromCodePoint(0xF05C0)
                 label: view.sys.tr("Распаковать архивы в папки")
                 onChosen: view.doExtractAllSelected(true)
             }
 
-            Rectangle {
-                visible: view.menuPath.length > 0 || view.selectedCount > 0
-                Layout.fillWidth: true
-                Layout.preferredHeight: 1
-                Layout.topMargin: 3
-                Layout.bottomMargin: 3
-                color: view.sys.colLine
+            // ========== EDIT ==========
+            MenuSectionHead {
+                visible: view.menuKind !== "trash"
+                title: "EDIT"
+                expanded: view.menuSecEdit
+                onToggled: view.toggleMenuSec("edit")
             }
-
             MenuItem {
-                visible: view.menuPath.length > 0 || view.selectedCount > 0
+                visible: view.menuSecEdit && view.menuKind !== "trash"
+                         && (view.menuPath.length > 0 || view.selectedCount > 0)
                 glyph: String.fromCodePoint(0xF018F)
                 label: view.selectedCount > 1 ? (view.sys.tr("Копировать (") + view.selectedCount + ")")
                                              : view.sys.tr("Копировать")
                 onChosen: view.doCopy(view.menuPath)
             }
             MenuItem {
-                visible: view.menuPath.length > 0 || view.selectedCount > 0
+                visible: view.menuSecEdit && view.menuKind !== "trash"
+                         && (view.menuPath.length > 0 || view.selectedCount > 0)
                 glyph: String.fromCodePoint(0xF0190)
                 label: view.selectedCount > 1 ? (view.sys.tr("Вырезать (") + view.selectedCount + ")")
                                              : view.sys.tr("Вырезать")
                 onChosen: view.doCut(view.menuPath)
             }
             MenuItem {
-                visible: view.menuKind !== "trash"
+                visible: view.menuSecEdit && view.menuKind !== "trash"
                 glyph: String.fromCodePoint(0xF0192)
                 label: view.clipPaths.length > 1 ? (view.sys.tr("Вставить (") + view.clipPaths.length + ")")
                                                 : view.sys.tr("Вставить")
@@ -2594,47 +3950,96 @@ Item {
                 onChosen: view.doPaste()
             }
             MenuItem {
-                visible: view.menuPath.length > 0 && view.selectedCount <= 1
+                visible: view.menuSecEdit && view.menuKind !== "trash"
+                         && view.menuPath.length > 0 && view.selectedCount <= 1
                 glyph: String.fromCodePoint(0xF03EB)
                 label: view.sys.tr("Переименовать")
                 onChosen: view.startRename(view.menuPath)
             }
             MenuItem {
-                visible: view.menuPath.length > 0 || view.selectedCount > 0
+                visible: view.menuSecEdit && view.menuKind !== "trash"
                 glyph: String.fromCodePoint(0xF0219)
                 label: view.sys.tr("Копировать путь")
                 onChosen: view.doCopyPath(view.menuPath)
             }
             MenuItem {
-                visible: view.menuPath.length > 0 && view.menuKind !== "trash" && view.selectedCount <= 1
-                glyph: String.fromCodePoint(0xF02FD)   // информация
+                visible: view.menuSecEdit && view.menuKind !== "trash"
+                         && (view.menuIsDir || view.menuPath.length === 0)
+                glyph: String.fromCodePoint(0xF04CE)
+                label: "Add to Favorites"
+                onChosen: view.addFavorite(view.menuPath.length ? view.menuPath : view.dir)
+            }
+            MenuItem {
+                visible: view.menuSecEdit && view.menuKind !== "trash"
+                         && view.menuPath.length > 0 && view.selectedCount <= 1
+                glyph: String.fromCodePoint(0xF02FD)
                 label: view.sys.tr("Свойства")
                 onChosen: view.showProps(view.menuPath)
             }
 
-            Rectangle {
+            // ========== CREATE ==========
+            MenuSectionHead {
                 visible: view.menuKind !== "trash"
-                Layout.fillWidth: true
-                Layout.preferredHeight: 1
-                Layout.topMargin: 3
-                Layout.bottomMargin: 3
-                color: view.sys.colLine
+                title: "CREATE"
+                expanded: view.menuSecCreate
+                onToggled: view.toggleMenuSec("create")
             }
-
-            // ---- меню самой папки
             MenuItem {
-                visible: view.menuKind !== "trash"
+                visible: view.menuSecCreate && view.menuKind !== "trash"
                 glyph: String.fromCodePoint(0xF0257)
                 label: view.sys.tr("Создать папку")
                 onChosen: view.startMkdir()
             }
             MenuItem {
-                visible: view.menuKind !== "trash"
+                visible: view.menuSecCreate && view.menuKind !== "trash"
+                glyph: String.fromCodePoint(0xF0219)
+                label: "New File"
+                onChosen: view.startNewFile()
+            }
+            MenuItem {
+                visible: view.menuSecCreate && view.menuKind !== "trash"
                 glyph: String.fromCodePoint(0xF0450)
                 label: view.sys.tr("Обновить")
                 onChosen: { view.closeMenu(); view.reload(); }
             }
-            // ---- меню закладки «Корзина»
+
+            // ========== GIT ==========
+            MenuSectionHead {
+                visible: view.menuKind !== "trash"
+                title: "GIT"
+                expanded: view.menuSecGit
+                onToggled: view.toggleMenuSec("git")
+            }
+            MenuItem {
+                visible: view.menuSecGit && view.menuKind !== "trash"
+                glyph: String.fromCodePoint(0xF02A2)
+                label: "Git Status"
+                onChosen: view.openGitPanel("status")
+            }
+            MenuItem {
+                visible: view.menuSecGit && view.menuKind !== "trash"
+                glyph: String.fromCodePoint(0xF0318)
+                label: "Git Log --oneline"
+                onChosen: view.openGitPanel("log")
+            }
+            MenuItem {
+                visible: view.menuSecGit && view.menuKind !== "trash" && !view.gitRepo
+                glyph: String.fromCodePoint(0xF02A2)
+                label: "Git Init"
+                onChosen: view.gitInitHere()
+            }
+
+            // ========== DANGER (sempre visível) ==========
+            Rectangle {
+                visible: view.menuKind !== "trash"
+                         && (view.menuPath.length > 0 || view.selectedCount > 0)
+                Layout.fillWidth: true
+                Layout.preferredHeight: 1
+                Layout.topMargin: 4
+                Layout.bottomMargin: 4
+                color: view.sys.colLine
+            }
+
             MenuItem {
                 visible: view.menuKind === "trash"
                 glyph: String.fromCodePoint(0xF0A79)
@@ -2644,12 +4049,32 @@ Item {
                 onChosen: view.emptyTrash()
             }
             MenuItem {
+                visible: view.inTrash && view.menuPath.length > 0
+                glyph: String.fromCodePoint(0xF0450)
+                label: "Restore"
+                onChosen: view.doRestore(view.menuPath)
+            }
+            MenuItem {
                 visible: view.menuPath.length > 0 || view.selectedCount > 0
                 glyph: String.fromCodePoint(0xF0A79)
                 label: view.selectedCount > 1 ? (view.sys.tr("В корзину (") + view.selectedCount + ")")
                                              : view.sys.tr("В корзину")
                 danger: true
                 onChosen: view.doTrash(view.menuPath)
+            }
+            MenuItem {
+                visible: (view.menuPath.length > 0 || view.selectedCount > 0) && view.menuKind !== "trash"
+                glyph: String.fromCodePoint(0xF01B4)
+                label: "Delete Permanently"
+                danger: true
+                onChosen: view.askDeletePermanent(view.menuPath)
+            }
+            MenuItem {
+                visible: view.inTrash && (view.menuPath.length > 0 || view.selectedCount > 0)
+                glyph: String.fromCodePoint(0xF01B4)
+                label: "Delete Permanently"
+                danger: true
+                onChosen: view.askDeletePermanent(view.menuPath)
             }
         }
     }
@@ -2847,6 +4272,302 @@ Item {
                     cursorShape: Qt.PointingHandCursor
                     onClicked: view.confirmDialog()
                 }
+            }
+        }
+    }
+
+    // ------------------------------------------------------ trash confirm
+    MouseArea {
+        anchors.fill: parent
+        z: 99
+        visible: view.trashConfirmOpen
+        onClicked: view.cancelTrashConfirm()
+    }
+    Rectangle {
+        z: 100
+        visible: view.trashConfirmOpen
+        anchors.centerIn: parent
+        width: 360
+        implicitHeight: trashConfCol.implicitHeight + 28
+        radius: 18
+        color: Qt.rgba(0.04, 0.04, 0.05, 0.98)
+        border.color: view.sys.colLine
+        border.width: 1
+        ColumnLayout {
+            id: trashConfCol
+            anchors.fill: parent
+            anchors.margins: 16
+            spacing: 10
+            Text {
+                text: view.trashConfirmMode === "empty" ? "EMPTY TRASH?" : "DELETE PERMANENTLY?"
+                color: view.sys.colFg
+                font { family: view.sys.fontFam; pixelSize: view.sys.fontSize; bold: true }
+            }
+            Text {
+                Layout.fillWidth: true
+                text: view.trashConfirmMode === "empty"
+                      ? "This cannot be undone."
+                      : (view.trashConfirmTargets.length === 1
+                         ? view.baseName(view.trashConfirmTargets[0])
+                         : (view.trashConfirmTargets.length + " items"))
+                color: view.sys.colMuted
+                wrapMode: Text.Wrap
+                font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2 }
+            }
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Item { Layout.fillWidth: true }
+                Rectangle {
+                    Layout.preferredWidth: cancelTrashLbl.implicitWidth + 20
+                    Layout.preferredHeight: 34
+                    radius: 10
+                    color: Qt.rgba(1, 1, 1, 0.06)
+                    border.color: view.sys.colLine; border.width: 1
+                    Text {
+                        id: cancelTrashLbl
+                        anchors.centerIn: parent
+                        text: "CANCEL"
+                        color: view.sys.colMuted
+                        font { family: view.sys.fontFam; pixelSize: 12 }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: view.cancelTrashConfirm()
+                    }
+                }
+                Rectangle {
+                    Layout.preferredWidth: okTrashLbl.implicitWidth + 20
+                    Layout.preferredHeight: 34
+                    radius: 10
+                    color: Qt.rgba(view.sys.colCrit.r, view.sys.colCrit.g, view.sys.colCrit.b, 0.85)
+                    Text {
+                        id: okTrashLbl
+                        anchors.centerIn: parent
+                        text: view.trashConfirmMode === "empty" ? "EMPTY" : "DELETE"
+                        color: "#fff"
+                        font { family: view.sys.fontFam; pixelSize: 12; bold: true }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: view.confirmTrashAction()
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------ git status panel
+    MouseArea {
+        anchors.fill: parent
+        z: 95
+        visible: view.gitPanelOpen
+        onClicked: view.closeGitPanel()
+    }
+    Rectangle {
+        z: 96
+        visible: view.gitPanelOpen
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.margins: 16
+        width: 320
+        height: Math.min(parent.height - 32, gitPanelCol.implicitHeight + 24)
+        radius: 16
+        color: Qt.rgba(0.04, 0.04, 0.05, 0.98)
+        border.color: view.sys.colLine
+        border.width: 1
+        ColumnLayout {
+            id: gitPanelCol
+            anchors.fill: parent
+            anchors.margins: 12
+            spacing: 6
+            RowLayout {
+                Layout.fillWidth: true
+                Text {
+                    Layout.fillWidth: true
+                    text: view.gitPanelTitle + (view.gitBrief.length ? (" · " + view.gitBrief) : "")
+                    color: view.sys.colFg
+                    font { family: view.sys.fontFam; pixelSize: 12; bold: true }
+                }
+                Text {
+                    text: "×"
+                    color: view.sys.colMuted
+                    font { family: view.sys.fontFam; pixelSize: 16 }
+                    MouseArea {
+                        anchors.fill: parent; anchors.margins: -6
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: view.closeGitPanel()
+                    }
+                }
+            }
+            Flickable {
+                Layout.fillWidth: true
+                Layout.preferredHeight: Math.min(280, gitLinesCol.implicitHeight)
+                contentHeight: gitLinesCol.implicitHeight
+                clip: true
+                Column {
+                    id: gitLinesCol
+                    width: parent.width
+                    spacing: 2
+                    Repeater {
+                        model: gitLines
+                        Text {
+                            required property var model
+                            width: gitLinesCol.width
+                            text: model.gLine
+                            elide: Text.ElideRight
+                            color: view.sys.colMuted
+                            font { family: view.sys.fontFam; pixelSize: 11 }
+                        }
+                    }
+                    Text {
+                        visible: gitLines.count === 0
+                        text: "CLEAN"
+                        color: view.sys.colOk
+                        font { family: view.sys.fontFam; pixelSize: 11 }
+                    }
+                }
+            }
+            RowLayout {
+                spacing: 8
+                Rectangle {
+                    Layout.preferredWidth: termGitLbl.implicitWidth + 16
+                    Layout.preferredHeight: 28
+                    radius: 8
+                    color: Qt.rgba(1, 1, 1, 0.06)
+                    Text {
+                        id: termGitLbl
+                        anchors.centerIn: parent
+                        text: "TERMINAL"
+                        color: view.sys.colMuted
+                        font { family: view.sys.fontFam; pixelSize: 10 }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: { view.closeGitPanel(); view.openTerminalHere(view.dir); }
+                    }
+                }
+                Rectangle {
+                    visible: view.hasCode
+                    Layout.preferredWidth: codeGitLbl.implicitWidth + 16
+                    Layout.preferredHeight: 28
+                    radius: 8
+                    color: Qt.rgba(1, 1, 1, 0.06)
+                    Text {
+                        id: codeGitLbl
+                        anchors.centerIn: parent
+                        text: "VS CODE"
+                        color: view.sys.colMuted
+                        font { family: view.sys.fontFam; pixelSize: 10 }
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: { view.closeGitPanel(); view.openInCode(view.dir); }
+                    }
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------ preview panel
+    MouseArea {
+        anchors.fill: parent
+        z: 93
+        visible: view.previewOpen
+        onClicked: view.closePreview()
+    }
+    Rectangle {
+        z: 94
+        visible: view.previewOpen
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
+        anchors.margins: 12
+        width: Math.min(420, parent.width * 0.42)
+        radius: 16
+        color: Qt.rgba(0.04, 0.04, 0.05, 0.98)
+        border.color: view.sys.colLine
+        border.width: 1
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 12
+            spacing: 8
+            RowLayout {
+                Layout.fillWidth: true
+                Text {
+                    Layout.fillWidth: true
+                    text: view.baseName(view.previewPath)
+                    elide: Text.ElideMiddle
+                    color: view.sys.colFg
+                    font { family: view.sys.fontFam; pixelSize: 13; bold: true }
+                }
+                Text {
+                    text: "×"
+                    color: view.sys.colMuted
+                    font { family: view.sys.fontFam; pixelSize: 16 }
+                    MouseArea {
+                        anchors.fill: parent; anchors.margins: -6
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: view.closePreview()
+                    }
+                }
+            }
+            Text {
+                Layout.fillWidth: true
+                text: view.previewMeta.length ? view.previewMeta : "READING…"
+                color: view.sys.colMuted
+                elide: Text.ElideRight
+                font { family: view.sys.fontFam; pixelSize: 10 }
+            }
+            Text {
+                visible: view.previewError.length > 0
+                Layout.fillWidth: true
+                text: view.previewError
+                color: view.sys.colWarn
+                wrapMode: Text.Wrap
+                font { family: view.sys.fontFam; pixelSize: 11 }
+            }
+            Image {
+                visible: view.previewKind === "image"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                fillMode: Image.PreserveAspectFit
+                asynchronous: true
+                source: view.previewKind === "image" && view.previewPath.length
+                        ? ("file://" + view.previewPath) : ""
+            }
+            Flickable {
+                visible: view.previewKind === "text"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                contentWidth: width
+                contentHeight: previewBody.implicitHeight
+                clip: true
+                Text {
+                    id: previewBody
+                    width: parent.width
+                    text: view.previewText
+                    color: view.sys.colFg
+                    wrapMode: Text.WrapAnywhere
+                    font { family: view.sys.fontFam; pixelSize: 11 }
+                }
+            }
+            Text {
+                visible: view.previewKind === "too_large" || view.previewKind === "none"
+                Layout.fillWidth: true
+                text: view.previewKind === "too_large" ? "TOO LARGE" : "NO PREVIEW"
+                color: view.sys.colMuted
+                font { family: view.sys.fontFam; pixelSize: 12 }
+            }
+            Text {
+                Layout.fillWidth: true
+                text: "Space · toggle preview"
+                color: Qt.rgba(1, 1, 1, 0.22)
+                font { family: view.sys.fontFam; pixelSize: 9 }
             }
         }
     }

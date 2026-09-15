@@ -31,6 +31,8 @@ B("pillBt",       mainMod .. " + SHIFT + B",     hl.dsp.exec_cmd(QS .. "bluetoot
 B("pillClip",     mainMod .. " + V",             hl.dsp.exec_cmd(QS .. "clipboard"))
 -- SUPER+C: mesmo Clipboard History (pedido Homelab rice). SUPER+V mantém-se.
 hl.bind(mainMod .. " + C", hl.dsp.exec_cmd(QS .. "clipboard"), { description = "Clipboard history" })
+-- Command Palette (ações do rice). SUPER+SHIFT+Space — floatCenter desativado.
+B("pillCommands", mainMod .. " + SHIFT + Space", hl.dsp.exec_cmd(QS .. "commands"))
 B("pillPower",    "CTRL + ALT + delete",         hl.dsp.exec_cmd(QS .. "powermenu"))
 B("pillNotif",    mainMod .. " + SHIFT + N",     hl.dsp.exec_cmd(QS .. "notifications"))
 B("pillRecord",   mainMod .. " + P",             hl.dsp.exec_cmd(QS .. "record"))

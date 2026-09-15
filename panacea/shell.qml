@@ -232,7 +232,9 @@ PanelWindow {
             // Голос в текст (voxtype): зажми правый Alt — говоришь, отпустил —
             // вставилось. Обрабатывается парой press/release в keybindings.lua.
             property string bind_voxDictate: "Alt_R"
-            property string bind_floatCenter: "SUPER + SHIFT + Space"
+            // floatCenter desativado: SUPER+SHIFT+Space → Command Palette.
+            property string bind_floatCenter: ""
+            property string bind_pillCommands: "SUPER + SHIFT + Space"
             property string bind_fileManager: "SUPER + E"
             property string bind_fileManagerTui: "SUPER + SHIFT + E"
             property string bind_toggleSplit: "SUPER + J"
@@ -240,7 +242,8 @@ PanelWindow {
             property string bind_screenshot: "SUPER + SHIFT + S"
             property string bind_screenOff: "SUPER + SHIFT + F12"
             property string bind_packWorkspaces: "SUPER + SHIFT + A"
-            property string bind_emptyWorkspace: "SUPER + Space"
+            // emptyWorkspace off: SUPER+Space = playerctl (custom/keybindings.lua).
+            property string bind_emptyWorkspace: ""
             property string bind_specialWorkspace: "SUPER + S"
         }
     }
@@ -268,7 +271,8 @@ PanelWindow {
         floatToggle:    "SUPER + W",
         pillVault:      "SUPER + SHIFT + P",
         voxDictate:     "Alt_R",
-        floatCenter:    "SUPER + SHIFT + Space",
+        floatCenter:    "",
+        pillCommands:   "SUPER + SHIFT + Space",
         fileManager:    "SUPER + E",
         fileManagerTui: "SUPER + SHIFT + E",
         toggleSplit:    "SUPER + J",
@@ -276,7 +280,7 @@ PanelWindow {
         screenshot:     "SUPER + SHIFT + S",
         screenOff:      "SUPER + SHIFT + F12",
         packWorkspaces: "SUPER + SHIFT + A",
-        emptyWorkspace: "SUPER + Space",
+        emptyWorkspace: "",
         specialWorkspace: "SUPER + S"
     })
 
@@ -650,8 +654,8 @@ PanelWindow {
         command: ["sh", "-c",
             "f=\"$HOME/.config/foot/panacea-theme\"; mkdir -p \"$(dirname \"$f\")\" || exit 0; " +
             "if [ -n \"$1\" ]; then " +
-            "sec=colors; printf '[colors-dark]\\nforeground=ffffff\\nbackground=000000\\n' | foot --check-config --config=/dev/stdin >/dev/null 2>&1 && sec=colors-dark; " +
-            "printf '[%s]\\nbackground=%s\\n' \"$sec\" \"$1\" > \"$f\"; " +
+            // foot 1.21 (Debian): only [colors] — never colors-dark
+            "printf '[colors]\\nbackground=%s\\n' \"$1\" > \"$f\"; " +
             "else : > \"$f\"; fi",
             "_", root.themeNothing ? root.termBg : ""]
     }
@@ -1883,6 +1887,33 @@ PanelWindow {
         togglePage("homelab");
     }
 
+    // Memória leve de UI (tabs/modos recentes). Não persiste em disco.
+    property var uiMemory: ({
+        sysloadTab: "current",
+        calMode: "month",
+        calDay: "",
+        calJumpToday: false,
+        audioSub: "",
+        clipQuery: ""
+    })
+    function patchUiMemory(patch) {
+        var next = {}
+        var cur = root.uiMemory || {}
+        for (var k in cur) next[k] = cur[k]
+        if (patch) for (var p in patch) next[p] = patch[p]
+        root.uiMemory = next
+    }
+    function openCommands() {
+        pageResetTimer.stop();
+        page = "commands";
+        expanded = true;
+        holdOpen = true;
+    }
+    function toggleCommands() {
+        if (expanded && page === "commands") collapse();
+        else openCommands();
+    }
+
     // Resumo operacional para a micro-barra SYSTEM STATUS (hub leve, ~20s).
     property var navStatusHub: ({ docker: false, ollama: false, ssh: false, failed_services: 0 })
     property bool navStatusReady: false
@@ -1919,14 +1950,14 @@ PanelWindow {
         var svcFail = Number(hub.failed_services || 0) > 0
 
         function mk(label, ok, unknown, section) {
-            var glyph = unknown ? "—" : (ok ? "●" : "×")
+            var glyph = unknown ? "—" : (ok ? "●" : "○")
             var col
             if (unknown)
                 col = root.colMuted
             else if (root.themeNothing)
-                col = ok ? root.colFg : root.colCrit
+                col = ok ? root.colFg : root.colMuted
             else
-                col = ok ? root.colOk : root.colCrit
+                col = ok ? root.colOk : root.colMuted
             return { label: label, glyph: glyph, color: col, section: section }
         }
 
@@ -2451,16 +2482,30 @@ PanelWindow {
         pCalAct.running = true
     }
 
-    function calDelete(id) {
-        pCalAct.command = ["bash", root.calSh, "delete", String(id)]
+    function calDelete(id, mode) {
+        var m = mode || "series"
+        pCalAct.command = ["bash", root.calSh, "delete", String(id), String(m)]
         pCalAct.running = false
         pCalAct.running = true
+    }
+
+    function calMarkReminded(id, key) {
+        pCalMark.command = ["bash", root.calSh, "mark-reminded",
+                            JSON.stringify({ id: String(id), key: String(key) })]
+        pCalMark.running = false
+        pCalMark.running = true
+    }
+
+    function calCheckReminders() {
+        if (!root.cfg.featCalendar) return
+        pCalDue.running = false
+        pCalDue.running = true
     }
 
     function calNextLabel() {
         var e = root.calNext
         if (!e || !e.title) return ""
-        if (e.started) return e.title + " · now"
+        if (e.started || e.state === "ACTIVE") return e.title + " · now"
         var sec = Number(e.starts_in_sec) || 0
         if (sec < 60) return e.title + " · " + sec + "s"
         if (sec < 3600) return e.title + " · " + Math.round(sec / 60) + "m"
@@ -2542,13 +2587,55 @@ PanelWindow {
             }
         }
     }
+    Process {
+        id: pCalDue
+        command: ["bash", root.calSh, "due-reminders"]
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    var d = JSON.parse(text)
+                    var due = d.due || []
+                    for (var i = 0; i < due.length; i++) {
+                        var item = due[i]
+                        root.calFireReminder(item)
+                    }
+                } catch (e) {}
+            }
+        }
+    }
+    Process {
+        id: pCalMark
+        running: false
+        stdout: StdioCollector {
+            onStreamFinished: { /* silent */ }
+        }
+    }
+    Process {
+        id: pCalNotify
+        running: false
+    }
+
+    function calFireReminder(item) {
+        if (!item) return
+        // mark first to avoid duplicates if notify is slow
+        root.calMarkReminded(item.id, item.key)
+        var title = String(item.notify_title || "Calendar")
+        var body = String(item.notify_body || item.event_title || "")
+        pCalNotify.command = ["notify-send", "-a", "Panacea", "-u", "normal", title, body]
+        pCalNotify.running = false
+        pCalNotify.running = true
+    }
 
     Timer {
         interval: 30000
         running: true
         repeat: true
         triggeredOnStart: true
-        onTriggered: root.calRefresh()
+        onTriggered: {
+            root.calRefresh()
+            root.calCheckReminders()
+        }
     }
 
     // ------------------------------------------------------------- яркость
@@ -4123,6 +4210,7 @@ PanelWindow {
         }
         function shortcuts(): void { root.toggleKeysWindow(); }
         function clipboard(): void { root.togglePage("clip"); }
+        function commands(): void { root.toggleCommands(); }
         function bonsai(): void { root.togglePage("bonsai"); }
         function powermenu(): void { root.togglePage("power"); }
         function weather(): void { root.openWeatherDetails(); }
@@ -6229,7 +6317,8 @@ PanelWindow {
                 NumberAnimation { duration: root.expanded ? root.animFast : 90; easing.type: Easing.OutCubic }
             }
 
-            sourceComponent: root.page === "launcher" ? launcherComp
+            sourceComponent                           : root.page === "launcher" ? launcherComp
+                           : root.page === "commands" ? commandsComp
                            : root.page === "settings" ? settingsComp
                            : root.page === "clip"     ? clipComp
                            : root.page === "power"    ? powerComp
@@ -6251,6 +6340,7 @@ PanelWindow {
 
         Component { id: controlsComp; ControlsView { sys: root } }
         Component { id: launcherComp; LauncherView { sys: root } }
+        Component { id: commandsComp; CommandPaletteView { sys: root } }
         Component { id: settingsComp; SettingsView { sys: root; tab: root.settingsTab } }
         Component { id: clipComp;     ClipboardView { sys: root } }
         Component { id: powerComp;    PowerView { sys: root } }

@@ -21,14 +21,23 @@ Item {
     property int selDay: (new Date()).getDate()
     property int tick: 0            // força update da linha de hora / countdown
 
-    // quick add fields
+    // quick add / edit fields
     property string fTitle: ""
     property string fDate: ""
     property string fStart: "09:00"
     property string fEnd: "10:00"
     property string fType: "EVENT"
     property string fDesc: ""
+    property string fReminder: "10"     // none|at_time|5|10|15|30|60
+    property string fRecurrence: "never" // never|daily|weekly|monthly
+    property string fEditId: ""         // master id when editing
     property bool fAdvanced: false
+    property string feedback: ""
+
+    // day interaction
+    property var detailEvent: null
+    property string confirmDelete: ""   // occurrence_id or master id
+    property string confirmMode: "series" // occurrence|series
 
     readonly property date today: new Date()
     readonly property string selYmd: {
@@ -40,6 +49,22 @@ Item {
         var _ = view.sys.calEpoch
         return view.sys.calEventsForDay ? view.sys.calEventsForDay(view.selYmd) : []
     }
+
+    readonly property var reminderOptions: [
+        { id: "none", label: "NONE" },
+        { id: "at_time", label: "AT TIME" },
+        { id: "5", label: "5 MIN" },
+        { id: "10", label: "10 MIN" },
+        { id: "15", label: "15 MIN" },
+        { id: "30", label: "30 MIN" },
+        { id: "60", label: "1 HOUR" }
+    ]
+    readonly property var recurOptions: [
+        { id: "never", label: "NEVER" },
+        { id: "daily", label: "DAILY" },
+        { id: "weekly", label: "WEEKLY" },
+        { id: "monthly", label: "MONTHLY" }
+    ]
 
     readonly property var monthsRu: ["Январь","Февраль","Март","Апрель","Май","Июнь",
                                      "Июль","Август","Сентябрь","Октябрь","Ноябрь","Декабрь"]
@@ -55,10 +80,33 @@ Item {
         view.sys.calRefresh()
         view.sys.calRefreshMonth(view.viewYear, view.viewMonth)
         view.fDate = view.sys.calYmd(new Date())
+        var mem = view.sys.uiMemory || {}
+        if (mem.calMode === "day" || mem.calMode === "month" || mem.calMode === "add")
+            view.mode = mem.calMode
+        if (mem.calJumpToday) {
+            view.goToday()
+            if (view.sys.patchUiMemory) view.sys.patchUiMemory({ calJumpToday: false })
+        } else if (mem.calDay && /^\d{4}-\d{2}-\d{2}$/.test(String(mem.calDay))) {
+            var p = String(mem.calDay).split("-")
+            view.openDay(parseInt(p[0], 10), parseInt(p[1], 10) - 1, parseInt(p[2], 10))
+        }
     }
 
+    function rememberUi() {
+        if (!view.sys || !view.sys.patchUiMemory) return
+        view.sys.patchUiMemory({
+            calMode: view.mode === "add" ? "day" : view.mode,
+            calDay: view.selYmd
+        })
+    }
+
+    onModeChanged: view.rememberUi()
+    onSelYmdChanged: if (view.mode === "day") view.rememberUi()
+
     Keys.onEscapePressed: {
-        if (view.mode === "add") { view.mode = "month"; return }
+        if (view.confirmDelete) { view.confirmDelete = ""; return }
+        if (view.detailEvent) { view.detailEvent = null; return }
+        if (view.mode === "add") { view.mode = "day"; return }
         if (view.mode === "day") { view.mode = "month"; return }
         view.sys.page = "main"
     }
@@ -124,34 +172,102 @@ Item {
         mode = "day"
     }
 
+    function nextPlausibleStart() {
+        var n = new Date()
+        var h = n.getHours()
+        var m = n.getMinutes()
+        // round up to next :00 or :30
+        if (m > 0 && m <= 30) m = 30
+        else if (m > 30) { m = 0; h = (h + 1) % 24 }
+        else m = 0
+        function z(x) { return (x < 10 ? "0" : "") + x }
+        return z(h) + ":" + z(m)
+    }
+
     function openAdd() {
+        fEditId = ""
         fTitle = ""
         fDate = selYmd
-        fStart = "09:00"
-        fEnd = "10:00"
+        fStart = view.nextPlausibleStart()
+        var sm = view.parseHm(fStart)
+        var em = sm + 60
+        function z(x) { return (x < 10 ? "0" : "") + x }
+        fEnd = z(Math.floor(em / 60) % 24) + ":" + z(em % 60)
         fType = "EVENT"
         fDesc = ""
+        fReminder = "10"
+        fRecurrence = "never"
         fAdvanced = false
+        detailEvent = null
+        confirmDelete = ""
+        mode = "add"
+    }
+
+    function openEdit(ev) {
+        if (!ev) return
+        fEditId = ev.series_id || ev.id || ""
+        // strip @occurrence from id if present
+        if (String(fEditId).indexOf("@") >= 0)
+            fEditId = String(fEditId).split("@")[0]
+        fTitle = ev.title || ""
+        fDate = ev.date || selYmd
+        fStart = ev.start_time || "09:00"
+        fEnd = ev.end_time || fStart
+        fType = ev.type || "EVENT"
+        fDesc = ev.description || ""
+        fReminder = ev.reminder || "10"
+        fRecurrence = ev.recurrence || "never"
+        fAdvanced = fRecurrence !== "never" || (fDesc && fDesc.length)
+        detailEvent = null
         mode = "add"
     }
 
     function createEvent() {
         if (!fTitle.trim()) return
-        view.sys.calCreate({
+        var obj = {
             title: fTitle.trim(),
             date: fDate || selYmd,
             start_time: fStart || "09:00",
             end_time: fEnd || fStart || "09:00",
             type: fType,
-            description: fDesc
-        })
+            description: fDesc,
+            reminder: fReminder || "10",
+            recurrence: fRecurrence || "never"
+        }
+        if (fEditId) obj.id = fEditId
+        view.sys.calCreate(obj)
+        view.flash("✓ SAVED")
         mode = "day"
-        // sync sel to event date
         var p = (fDate || selYmd).split("-")
         if (p.length === 3) {
             selYear = +p[0]; selMonth = +p[1] - 1; selDay = +p[2]
             viewYear = selYear; viewMonth = selMonth
         }
+    }
+
+    function flash(msg) {
+        view.feedback = msg
+        feedbackTimer.restart()
+    }
+
+    Timer { id: feedbackTimer; interval: 900; onTriggered: view.feedback = "" }
+
+    function openDetail(ev) { view.detailEvent = ev; view.confirmDelete = "" }
+
+    function askDelete(ev) {
+        if (!ev) return
+        var oid = ev.occurrence_id || ev.id
+        view.confirmDelete = oid
+        view.confirmMode = (ev.is_occurrence || (ev.recurrence && ev.recurrence !== "never"))
+                           ? "occurrence" : "series"
+    }
+
+    function doDelete() {
+        if (!view.confirmDelete) return
+        view.sys.calDelete(view.confirmDelete, view.confirmMode)
+        view.confirmDelete = ""
+        view.detailEvent = null
+        view.flash("✓ DELETED")
     }
 
     function markFor(dayNum) {
@@ -172,12 +288,31 @@ Item {
 
     function fmtCountdown(sec) {
         sec = Number(sec) || 0
-        if (sec <= 0) return "STARTED"
+        if (sec <= 0) return "now"
         if (sec < 60) return "in " + sec + "s"
         if (sec < 3600) return "in " + Math.round(sec / 60) + " min"
         var h = Math.floor(sec / 3600)
         var m = Math.round((sec % 3600) / 60)
         return "in " + h + "h " + m + "m"
+    }
+
+    function reminderLabel(r) {
+        r = String(r || "10")
+        for (var i = 0; i < view.reminderOptions.length; i++)
+            if (view.reminderOptions[i].id === r) return view.reminderOptions[i].label
+        return r
+    }
+
+    function eventActive(ev) {
+        if (!ev) return false
+        if (ev.state === "ACTIVE") return true
+        var t = new Date()
+        if (ev.date !== view.sys.calYmd(t)) return false
+        var now = t.getHours() * 60 + t.getMinutes()
+        var sm = view.parseHm(ev.start_time)
+        var em = view.parseHm(ev.end_time || ev.start_time)
+        if (em < sm) em += 24 * 60
+        return now >= sm && now <= em
     }
 
     readonly property var cells: {
@@ -305,23 +440,36 @@ Item {
                     font { family: view.sys.fontFam; pixelSize: 10; letterSpacing: 1; bold: true }
                 }
                 Text {
+                    text: (view.sys.calNext && view.sys.calNext.start_time) || ""
+                    color: view.sys.colFg
+                    font { family: view.sys.fontFam; pixelSize: view.sys.fontSize; bold: true }
+                }
+                Text {
                     Layout.fillWidth: true
                     text: (view.sys.calNext && view.sys.calNext.title) || ""
                     color: view.sys.colFg
                     elide: Text.ElideRight
-                    font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 1; bold: true }
+                    font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 1 }
                 }
                 Text {
                     text: {
                         var _ = view.tick
                         var e = view.sys.calNext
                         if (!e) return ""
-                        return (e.start_time || "") + "  ·  " + view.fmtCountdown(e.starts_in_sec)
+                        return view.fmtCountdown(e.starts_in_sec)
                     }
                     color: view.sys.colMuted
                     font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 3 }
                 }
             }
+        }
+
+        Text {
+            visible: view.feedback.length > 0
+            text: view.feedback
+            color: view.sys.colOk
+            font { family: view.sys.fontFam; pixelSize: 10; bold: true }
+            Layout.alignment: Qt.AlignRight
         }
 
         // ---------------- MONTH
@@ -514,137 +662,223 @@ Item {
                 }
             }
 
-            // timeline hours 8–22
-            Item {
+            // lista do dia — só eventos (hora + título), sem grelha de horas
+            ColumnLayout {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 280
-                readonly property int startMin: 8 * 60
-                readonly property int endMin: 22 * 60
-                readonly property int span: endMin - startMin
+                spacing: 4
+                visible: view.dayEvents.length > 0
 
-                function yOf(min) {
-                    var t = Math.max(startMin, Math.min(endMin, min))
-                    return (t - startMin) / span * height
-                }
-
-                Repeater {
-                    model: [8, 10, 12, 14, 16, 18, 20, 22]
-                    Rectangle {
-                        required property int modelData
-                        width: parent.width
-                        height: 1
-                        y: parent.yOf(modelData * 60)
-                        color: Qt.rgba(1, 1, 1, 0.06)
-                        Text {
-                            anchors.left: parent.left
-                            anchors.bottom: parent.top
-                            anchors.bottomMargin: 1
-                            text: (modelData < 10 ? "0" : "") + modelData + ":00"
-                            color: view.sys.colMuted
-                            font { family: view.sys.fontFam; pixelSize: 9 }
-                        }
-                    }
-                }
-
-                // events
                 Repeater {
                     model: view.dayEvents
-                    Rectangle {
+                    delegate: Rectangle {
+                        id: evRow
                         required property var modelData
-                        readonly property int sm: view.parseHm(modelData.start_time)
-                        readonly property int em: Math.max(sm + 30, view.parseHm(modelData.end_time || modelData.start_time))
-                        x: 44
-                        width: parent.width - 48
-                        y: parent.yOf(sm)
-                        height: Math.max(28, parent.yOf(em) - parent.yOf(sm))
+                        readonly property bool active: view.eventActive(modelData)
+                        Layout.fillWidth: true
+                        height: 28
                         radius: 8
-                        color: modelData.type === "DEADLINE"
-                               ? Qt.rgba(view.sys.colWarn.r, view.sys.colWarn.g, view.sys.colWarn.b, 0.16)
-                               : Qt.rgba(1, 1, 1, 0.07)
-                        border.color: view.sys.colLine
-                        border.width: 1
-                        Column {
+                        color: rowMa.containsMouse ? Qt.rgba(1, 1, 1, 0.07) : "transparent"
+
+                        RowLayout {
                             anchors.fill: parent
-                            anchors.margins: 6
-                            spacing: 1
+                            anchors.leftMargin: 4
+                            anchors.rightMargin: 4
+                            spacing: 8
                             Text {
-                                width: parent.width
-                                text: (modelData.type === "DEADLINE" ? "▲ " : "") + (modelData.title || "")
+                                text: modelData.start_time || ""
+                                color: view.sys.colMuted
+                                font { family: view.sys.fontFam; pixelSize: 12 }
+                                Layout.preferredWidth: 40
+                            }
+                            Text {
+                                text: "──"
+                                color: Qt.rgba(1, 1, 1, 0.22)
+                                font { family: view.sys.fontFam; pixelSize: 12 }
+                            }
+                            Text {
+                                visible: evRow.active
+                                text: "●"
+                                color: view.sys.colOn
+                                font { family: view.sys.fontFam; pixelSize: 11 }
+                            }
+                            Text {
+                                visible: modelData.type === "DEADLINE"
+                                text: "▲"
+                                color: view.sys.colWarn
+                                font { family: view.sys.fontFam; pixelSize: 11 }
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: modelData.title || ""
                                 elide: Text.ElideRight
                                 color: view.sys.colFg
-                                font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 3; bold: true }
-                            }
-                            Text {
-                                width: parent.width
-                                text: (modelData.start_time || "") + " → " + (modelData.end_time || "")
-                                color: view.sys.colMuted
-                                font { family: view.sys.fontFam; pixelSize: 9 }
+                                font { family: view.sys.fontFam; pixelSize: 13 }
                             }
                         }
+
                         MouseArea {
+                            id: rowMa
                             anchors.fill: parent
-                            acceptedButtons: Qt.RightButton
-                            onClicked: view.sys.calDelete(modelData.id)
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            onClicked: mouse => {
+                                if (mouse.button === Qt.RightButton)
+                                    view.askDelete(modelData)
+                                else
+                                    view.openDetail(modelData)
+                            }
                         }
                     }
                 }
+            }
 
-                // current time line (only if selected day is today)
-                Rectangle {
-                    visible: {
-                        var _ = view.tick
-                        var t = new Date()
-                        return view.selYear === t.getFullYear()
-                            && view.selMonth === t.getMonth()
-                            && view.selDay === t.getDate()
-                            && view.minsNow() >= parent.startMin
-                            && view.minsNow() <= parent.endMin
-                    }
-                    width: parent.width
-                    height: 1
-                    y: parent.yOf(view.minsNow())
-                    color: view.sys.colOn
-                    opacity: 0.85
+            Text {
+                Layout.fillWidth: true
+                Layout.topMargin: 8
+                Layout.bottomMargin: 8
+                visible: view.dayEvents.length === 0
+                text: "No events scheduled."
+                horizontalAlignment: Text.AlignHCenter
+                color: view.sys.colMuted
+                font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2; italic: true }
+            }
+
+            // detail / confirm
+            Rectangle {
+                Layout.fillWidth: true
+                visible: view.detailEvent !== null && !view.confirmDelete
+                radius: 12
+                color: Qt.rgba(1, 1, 1, 0.05)
+                border.color: view.sys.colLine
+                border.width: 1
+                implicitHeight: detCol.implicitHeight + 16
+                ColumnLayout {
+                    id: detCol
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    spacing: 4
                     Text {
-                        anchors.left: parent.left
-                        anchors.verticalCenter: parent.verticalCenter
-                        anchors.verticalCenterOffset: -8
-                        text: {
-                            var _ = view.tick
-                            var n = new Date()
-                            function z(x) { return (x < 10 ? "0" : "") + x }
-                            return z(n.getHours()) + ":" + z(n.getMinutes())
-                        }
-                        color: view.sys.colOn
-                        font { family: view.sys.fontFam; pixelSize: 9; bold: true }
+                        Layout.fillWidth: true
+                        text: (view.detailEvent && view.detailEvent.title) || ""
+                        color: view.sys.colFg
+                        elide: Text.ElideRight
+                        font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 1; bold: true }
                     }
-                    Rectangle {
-                        width: 6; height: 6; radius: 3
-                        anchors.verticalCenter: parent.verticalCenter
-                        x: 38
-                        color: view.sys.colOn
+                    Text {
+                        text: {
+                            var e = view.detailEvent
+                            if (!e) return ""
+                            return (e.start_time || "") + " → " + (e.end_time || "")
+                                   + "   " + (e.type || "EVENT")
+                        }
+                        color: view.sys.colMuted
+                        font { family: view.sys.fontFam; pixelSize: 11 }
+                    }
+                    Text {
+                        text: {
+                            var e = view.detailEvent
+                            if (!e) return ""
+                            var line = "REMINDER  " + view.reminderLabel(e.reminder)
+                            if (e.recurrence && e.recurrence !== "never")
+                                line += "   ·   " + String(e.recurrence).toUpperCase()
+                            return line
+                        }
+                        color: view.sys.colMuted
+                        font { family: view.sys.fontFam; pixelSize: 10 }
+                    }
+                    RowLayout {
+                        spacing: 8
+                        Rectangle {
+                            height: 26; radius: 8; width: editLbl.implicitWidth + 16
+                            color: Qt.rgba(1, 1, 1, 0.08)
+                            Text { id: editLbl; anchors.centerIn: parent; text: "EDIT"; color: view.sys.colFg; font { family: view.sys.fontFam; pixelSize: 10 } }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.openEdit(view.detailEvent) }
+                        }
+                        Rectangle {
+                            height: 26; radius: 8; width: delLbl.implicitWidth + 16
+                            color: Qt.rgba(1, 1, 1, 0.08)
+                            Text { id: delLbl; anchors.centerIn: parent; text: "DELETE"; color: view.sys.colCrit; font { family: view.sys.fontFam; pixelSize: 10 } }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.askDelete(view.detailEvent) }
+                        }
+                        Item { Layout.fillWidth: true }
+                        Text {
+                            text: "✕"
+                            color: view.sys.colMuted
+                            font { family: view.sys.fontFam; pixelSize: 12 }
+                            MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: view.detailEvent = null }
+                        }
                     }
                 }
+            }
 
-                Text {
-                    anchors.centerIn: parent
-                    visible: view.dayEvents.length === 0
-                    text: "No events scheduled.\nClear day"
-                    horizontalAlignment: Text.AlignHCenter
-                    color: view.sys.colMuted
-                    font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2; italic: true }
+            Rectangle {
+                Layout.fillWidth: true
+                visible: view.confirmDelete.length > 0
+                radius: 12
+                color: Qt.rgba(1, 1, 1, 0.05)
+                border.color: view.sys.colCrit
+                border.width: 1
+                implicitHeight: confDel.implicitHeight + 16
+                ColumnLayout {
+                    id: confDel
+                    anchors.fill: parent
+                    anchors.margins: 10
+                    spacing: 8
+                    Text {
+                        text: "DELETE EVENT?"
+                        color: view.sys.colFg
+                        font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 1; bold: true }
+                    }
+                    Text {
+                        text: (view.detailEvent && view.detailEvent.title) || ""
+                        color: view.sys.colMuted
+                        font { family: view.sys.fontFam; pixelSize: 11 }
+                    }
+                    RowLayout {
+                        spacing: 6
+                        visible: view.confirmMode === "occurrence"
+                                 || (view.detailEvent && view.detailEvent.is_occurrence)
+                        Rectangle {
+                            height: 26; radius: 8; width: occLbl.implicitWidth + 14
+                            color: view.confirmMode === "occurrence" ? Qt.rgba(1,1,1,0.14) : Qt.rgba(1,1,1,0.05)
+                            Text { id: occLbl; anchors.centerIn: parent; text: "OCCURRENCE"; color: view.sys.colFg; font { family: view.sys.fontFam; pixelSize: 9 } }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.confirmMode = "occurrence" }
+                        }
+                        Rectangle {
+                            height: 26; radius: 8; width: serLbl.implicitWidth + 14
+                            color: view.confirmMode === "series" ? Qt.rgba(1,1,1,0.14) : Qt.rgba(1,1,1,0.05)
+                            Text { id: serLbl; anchors.centerIn: parent; text: "SERIES"; color: view.sys.colFg; font { family: view.sys.fontFam; pixelSize: 9 } }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.confirmMode = "series" }
+                        }
+                    }
+                    RowLayout {
+                        spacing: 8
+                        Rectangle {
+                            height: 28; radius: 8; width: cxlLbl.implicitWidth + 18
+                            color: Qt.rgba(1, 1, 1, 0.06)
+                            Text { id: cxlLbl; anchors.centerIn: parent; text: "CANCEL"; color: view.sys.colMuted; font { family: view.sys.fontFam; pixelSize: 10 } }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.confirmDelete = "" }
+                        }
+                        Rectangle {
+                            height: 28; radius: 8; width: confLbl.implicitWidth + 18
+                            color: Qt.rgba(view.sys.colCrit.r, view.sys.colCrit.g, view.sys.colCrit.b, 0.2)
+                            Text { id: confLbl; anchors.centerIn: parent; text: "DELETE"; color: view.sys.colCrit; font { family: view.sys.fontFam; pixelSize: 10; bold: true } }
+                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: view.doDelete() }
+                        }
+                    }
                 }
             }
         }
 
-        // ---------------- QUICK ADD
+        // ---------------- QUICK ADD / EDIT
         ColumnLayout {
             Layout.fillWidth: true
             spacing: 8
             visible: view.mode === "add"
 
             Text {
-                text: "NEW EVENT"
+                text: view.fEditId ? "EDIT EVENT" : "NEW EVENT"
                 color: view.sys.colFg
                 font { family: view.sys.fontFam; pixelSize: view.sys.fontSize; bold: true }
             }
@@ -665,6 +899,7 @@ Item {
                     border.color: view.sys.colLine
                 }
                 Component.onCompleted: forceActiveFocus()
+                Keys.onReturnPressed: view.createEvent()
             }
 
             RowLayout {
@@ -705,6 +940,11 @@ Item {
                 }
             }
 
+            Text {
+                text: "TYPE"
+                color: view.sys.colMuted
+                font { family: view.sys.fontFam; pixelSize: 9; letterSpacing: 1 }
+            }
             RowLayout {
                 spacing: 6
                 Repeater {
@@ -730,6 +970,96 @@ Item {
                 }
             }
 
+            Text {
+                text: "REMINDER"
+                color: view.sys.colMuted
+                font { family: view.sys.fontFam; pixelSize: 9; letterSpacing: 1 }
+            }
+            Flow {
+                Layout.fillWidth: true
+                spacing: 6
+                Repeater {
+                    model: view.reminderOptions
+                    delegate: Rectangle {
+                        required property var modelData
+                        height: 22; radius: 8
+                        width: remLbl.implicitWidth + 12
+                        color: view.fReminder === modelData.id ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.04)
+                        Text {
+                            id: remLbl
+                            anchors.centerIn: parent
+                            text: modelData.label
+                            color: view.fReminder === modelData.id ? view.sys.colFg : view.sys.colMuted
+                            font { family: view.sys.fontFam; pixelSize: 9 }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: view.fReminder = modelData.id
+                        }
+                    }
+                }
+            }
+
+            Text {
+                text: view.fAdvanced ? "ADVANCED ▾" : "ADVANCED ▸"
+                color: view.sys.colMuted
+                font { family: view.sys.fontFam; pixelSize: 9; letterSpacing: 1 }
+                MouseArea {
+                    anchors.fill: parent
+                    anchors.margins: -4
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: view.fAdvanced = !view.fAdvanced
+                }
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 6
+                visible: view.fAdvanced
+                Text {
+                    text: "REPEAT"
+                    color: view.sys.colMuted
+                    font { family: view.sys.fontFam; pixelSize: 9; letterSpacing: 1 }
+                }
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Repeater {
+                        model: view.recurOptions
+                        delegate: Rectangle {
+                            required property var modelData
+                            height: 22; radius: 8
+                            width: recLbl.implicitWidth + 12
+                            color: view.fRecurrence === modelData.id ? Qt.rgba(1, 1, 1, 0.14) : Qt.rgba(1, 1, 1, 0.04)
+                            Text {
+                                id: recLbl
+                                anchors.centerIn: parent
+                                text: modelData.label
+                                color: view.fRecurrence === modelData.id ? view.sys.colFg : view.sys.colMuted
+                                font { family: view.sys.fontFam; pixelSize: 9 }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: view.fRecurrence = modelData.id
+                            }
+                        }
+                    }
+                }
+                TextField {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 34
+                    placeholderText: "DESCRIPTION (optional)"
+                    text: view.fDesc
+                    onTextChanged: view.fDesc = text
+                    color: view.sys.colFg
+                    placeholderTextColor: view.sys.colMuted
+                    font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 3 }
+                    background: Rectangle { radius: 10; color: Qt.rgba(1, 1, 1, 0.06); border.color: view.sys.colLine }
+                }
+            }
+
             RowLayout {
                 Layout.fillWidth: true
                 spacing: 8
@@ -740,7 +1070,7 @@ Item {
                     Text {
                         id: createLbl
                         anchors.centerIn: parent
-                        text: "CREATE"
+                        text: view.fEditId ? "SAVE" : "CREATE"
                         color: view.sys.colOn
                         font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2; bold: true }
                     }
@@ -764,7 +1094,7 @@ Item {
                     MouseArea {
                         anchors.fill: parent
                         cursorShape: Qt.PointingHandCursor
-                        onClicked: view.mode = "month"
+                        onClicked: view.mode = "day"
                     }
                 }
                 Item { Layout.fillWidth: true }

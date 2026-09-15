@@ -27,6 +27,13 @@ FocusScope {
         (Quickshell.env("XDG_CACHE_HOME") || (Quickshell.env("HOME") + "/.cache"))
         + "/panacea/recent-apps"
 
+    // Pins do utilizador — sempre no topo (lista vazia e com busca).
+    // Persistidos em ~/.config/panacea/launcher_pins.json
+    property var pins: []
+    readonly property string pinsFile:
+        (Quickshell.env("XDG_CONFIG_HOME") || (Quickshell.env("HOME") + "/.config"))
+        + "/panacea/launcher_pins.json"
+
     Process {
         id: pRecentRead
         command: ["sh", "-c", "cat \"$1\" 2>/dev/null", "_", view.recentFile]
@@ -36,6 +43,65 @@ FocusScope {
         }
     }
     Process { id: pRecentWrite }
+
+    Process {
+        id: pPinsRead
+        command: ["sh", "-c", "cat \"$1\" 2>/dev/null", "_", view.pinsFile]
+        running: true
+        stdout: StdioCollector {
+            onStreamFinished: {
+                try {
+                    var o = JSON.parse(text.trim() || "{}");
+                    var list = o.pins || [];
+                    view.pins = list.map(function (x) {
+                        return typeof x === "string" ? x : String(x.id || x || "");
+                    }).filter(function (x) { return x.length > 0; });
+                } catch (e) {
+                    view.pins = [];
+                }
+            }
+        }
+    }
+    Process { id: pPinsWrite }
+
+    function appId(app) {
+        return String(app.id || app.name || "");
+    }
+    function isPinned(app) {
+        return view.pins.indexOf(view.appId(app)) >= 0;
+    }
+    function pinRank(app) {
+        var i = view.pins.indexOf(view.appId(app));
+        return i < 0 ? 9999 : i;
+    }
+    function savePins() {
+        var payload = JSON.stringify({ pins: view.pins }, null, 2);
+        pPinsWrite.command = ["sh", "-c",
+            "mkdir -p \"$(dirname \"$1\")\"; printf '%s' \"$2\" > \"$1\"",
+            "_", view.pinsFile, payload];
+        pPinsWrite.running = false;
+        pPinsWrite.running = true;
+    }
+    function togglePin(app) {
+        if (!app || app.builtin === "bootos") return;
+        var id = view.appId(app);
+        if (!id.length) return;
+        var list = view.pins.slice();
+        var i = list.indexOf(id);
+        if (i >= 0) list.splice(i, 1);
+        else {
+            list.unshift(id);
+            if (list.length > 24) list = list.slice(0, 24);
+        }
+        view.pins = list;
+        view.savePins();
+        // força recompute de results
+        view.pins = view.pins.slice();
+    }
+    function togglePinCurrent() {
+        var app = view.results[view.index];
+        if (app) view.togglePin(app);
+    }
 
     function rememberApp(app) {
         var id = String(app.id || app.name || "");
@@ -153,26 +219,18 @@ FocusScope {
         return String(b.keys).toLowerCase().indexOf(q) >= 0;
     }
 
-    // Отбор и сортировка: сперва совпадения с начала имени, потом остальные.
+    // Отбор и сортировка: pins do utilizador → builtins (com busca) → starts → contains.
     readonly property var results: {
         var q = query.trim().toLowerCase();
         var all = DesktopEntries.applications ? DesktopEntries.applications.values : [];
         var starts = [], contains = [];
-        // Свои строки держим отдельным списком, а не в starts: тот в конце
-        // сортируется по алфавиту, и «Агенты» уехали бы в середину выдачи.
-        // Их спрашивают по имени, прицельно, поэтому место у них первое.
-        var pinned = [];
+        // builtins que batem na busca (não confundir com pins do user)
+        var builtinHits = [];
+        var _pins = view.pins; // dependência explícita
         for (var b = 0; b < view.extras.length; b++) {
             var bi = view.extras[b];
-            // С пустым запросом своя строка идёт в общий список и встаёт по
-            // давности наравне с приложениями: открыли её последней — она и
-            // первая. С запросом место у неё всегда первое.
-            //
-            // Кроме систем: их в списке «всё подряд» нет вовсе. Там их строка
-            // стояла бы вплотную к браузеру, и промах по Enter уводил бы в
-            // перезагрузку. Систему вызывают намеренно, набрав её имя.
             if (q.length === 0) { if (bi.builtin !== "bootos") starts.push(bi); }
-            else if (view.builtinMatches(bi, q)) pinned.push(bi);
+            else if (view.builtinMatches(bi, q)) builtinHits.push(bi);
         }
         for (var i = 0; i < all.length; i++) {
             var a = all[i];
@@ -187,17 +245,52 @@ FocusScope {
         var byName = function (x, y) {
             return String(x.name || "").localeCompare(String(y.name || ""));
         };
-        // Пустой запрос — сверху то, что запускали недавно: курсор сразу
-        // стоит на последнем открытом приложении.
+        // Separar pins do resto, ordem = ordem no ficheiro de pins
+        var takePins = function (arr) {
+            var pinned = [], rest = [];
+            for (var i = 0; i < arr.length; i++) {
+                if (view.isPinned(arr[i])) pinned.push(arr[i]);
+                else rest.push(arr[i]);
+            }
+            pinned.sort(function (x, y) { return view.pinRank(x) - view.pinRank(y); });
+            return { pinned: pinned, rest: rest };
+        };
+
         if (q.length === 0) {
-            starts.sort(function (x, y) {
+            var emptySplit = takePins(starts);
+            emptySplit.rest.sort(function (x, y) {
                 var d = view.recentRank(x) - view.recentRank(y);
                 return d !== 0 ? d : byName(x, y);
             });
-            return starts;
+            return emptySplit.pinned.concat(emptySplit.rest);
         }
-        starts.sort(byName); contains.sort(byName);
-        return pinned.concat(starts, contains);
+
+        // Com busca: pins que batem no topo (ordem de pin), depois builtins,
+        // depois prefixo, depois substring — sem perder a hierarquia starts/contains.
+        var splitS = takePins(starts);
+        var splitC = takePins(contains);
+        var pinSeen = {};
+        var pinList = [];
+        var addPin = function (app) {
+            var id = view.appId(app);
+            if (!id.length || pinSeen[id]) return;
+            pinSeen[id] = true;
+            pinList.push(app);
+        };
+        for (var ps = 0; ps < splitS.pinned.length; ps++) addPin(splitS.pinned[ps]);
+        for (var pc = 0; pc < splitC.pinned.length; pc++) addPin(splitC.pinned[pc]);
+        for (var bh = 0; bh < builtinHits.length; bh++) {
+            if (view.isPinned(builtinHits[bh])) addPin(builtinHits[bh]);
+        }
+        pinList.sort(function (x, y) { return view.pinRank(x) - view.pinRank(y); });
+
+        var builtinsRest = [];
+        for (var k = 0; k < builtinHits.length; k++) {
+            if (!view.isPinned(builtinHits[k])) builtinsRest.push(builtinHits[k]);
+        }
+        splitS.rest.sort(byName);
+        splitC.rest.sort(byName);
+        return pinList.concat(builtinsRest, splitS.rest, splitC.rest);
     }
 
     // ------------------------------------------------------------ калькулятор
@@ -307,6 +400,12 @@ FocusScope {
                     Keys.onEnterPressed:  view.launch()
                     Keys.onEscapePressed: view.sys.closeLauncher()
                     Keys.onTabPressed:    view.move(1)
+                    Keys.onPressed: event => {
+                        if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_P) {
+                            view.togglePinCurrent();
+                            event.accepted = true;
+                        }
+                    }
                 }
                 Text {
                     visible: view.results.length > 0
@@ -469,6 +568,34 @@ FocusScope {
                         }
                     }
 
+                    Item {
+                        Layout.preferredWidth: 22
+                        Layout.preferredHeight: 22
+                        visible: row.modelData.builtin !== "bootos"
+                                 && (view.isPinned(row.modelData)
+                                     || row.index === view.index
+                                     || rowMa.containsMouse)
+                        Text {
+                            anchors.centerIn: parent
+                            text: view.isPinned(row.modelData)
+                                  ? String.fromCodePoint(0xF0131)
+                                  : String.fromCodePoint(0xF0130)
+                            color: view.isPinned(row.modelData)
+                                   ? view.sys.colOn
+                                   : (pinMa.containsMouse ? view.sys.colFg : view.sys.colMuted)
+                            font { family: view.sys.fontFam; pixelSize: 14 }
+                        }
+                        MouseArea {
+                            id: pinMa
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                view.togglePin(row.modelData);
+                            }
+                        }
+                    }
+
                     Text {
                         visible: row.index === view.index
                         text: "󰌑"
@@ -480,6 +607,7 @@ FocusScope {
                 MouseArea {
                     id: rowMa
                     anchors.fill: parent
+                    anchors.rightMargin: 40
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
                     onEntered: view.index = row.index

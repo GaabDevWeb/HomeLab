@@ -399,6 +399,7 @@ ColumnLayout {
             BindRow { bindId: "pillWifi";      label: page.sys.tr("Список сетей") }
             BindRow { bindId: "pillBt";        label: page.sys.tr("Устройства Bluetooth") }
             BindRow { bindId: "pillClip";      label: page.sys.tr("Буфер обмена") }
+            BindRow { bindId: "pillCommands";  label: "Command Palette" }
             BindRow { bindId: "pillPower";     label: page.sys.tr("Меню питания") }
             BindRow { bindId: "pillRecord";    label: page.sys.tr("Запись экрана") }
             BindRow { bindId: "voxDictate";    label: page.sys.tr("Голос в текст") }
@@ -430,7 +431,7 @@ ColumnLayout {
             BindRow { bindId: "closeWindow"; label: page.sys.tr("Закрыть окно") }
             BindRow { bindId: "fullscreen";  label: page.sys.tr("Во весь экран") }
             BindRow { bindId: "floatToggle"; label: page.sys.tr("Плавающее окно") }
-            BindRow { bindId: "floatCenter"; label: page.sys.tr("Плавающее по центру") }
+            BindRow { bindId: "floatCenter"; label: page.sys.tr("Плавающее по центру") + " (off)" }
             BindRow { bindId: "toggleSplit"; label: page.sys.tr("Сменить направление сплита") }
 
             Head { text: page.sys.tr("Рабочие столы") }

@@ -5,7 +5,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Pipewire
 
-// Звук: общая громкость, выбор устройства вывода и раздельный микшер приложений.
+// Звук: общая громкость, устройство вывода, EasyEffects + спектр Cava.
 Item {
     id: view
     property var sys
@@ -18,10 +18,6 @@ Item {
 
     readonly property var sink: Pipewire.defaultAudioSink
     readonly property var sinkAudio: sink ? sink.audio : null
-
-    // -------------------------------------------------- микшер приложений (pactl)
-    property var streamsList: []
-    property bool isUserDragging: false
 
     // EasyEffects (semantic bridge — não DSP próprio)
     property var ee: ({
@@ -324,76 +320,7 @@ Item {
 
     Component.onCompleted: {
         forceActiveFocus();
-        pStreams.running = true;
         eeRefresh();
-    }
-
-    Process {
-        id: pStreams
-        command: ["sh", "-c", Quickshell.env("HOME") + "/.config/panacea/scripts/audio_streams.sh list"]
-        stdout: SplitParser {
-            onRead: data => {
-                // Не перезаписываем список, если пользователь прямо сейчас тянет ползунок
-                if (view.isUserDragging) return;
-                try {
-                    var parsed = JSON.parse(data.trim());
-                    if (Array.isArray(parsed)) {
-                        view.streamsList = parsed;
-                    }
-                } catch (e) {}
-            }
-        }
-    }
-
-    Timer {
-        id: streamsTimer
-        interval: 1000
-        repeat: true
-        running: view.visible
-        onTriggered: {
-            if (!view.isUserDragging && !pStreams.running) pStreams.running = true;
-        }
-    }
-
-    Process {
-        id: pStreamAction
-    }
-
-    function setAppVolume(streamId, pct) {
-        pStreamAction.command = ["sh", "-c", Quickshell.env("HOME")
-                                 + "/.config/panacea/scripts/audio_streams.sh set-volume "
-                                 + streamId + " " + pct];
-        pStreamAction.running = true;
-    }
-
-    function toggleAppMute(streamId) {
-        pStreamAction.command = ["sh", "-c", Quickshell.env("HOME")
-                                 + "/.config/panacea/scripts/audio_streams.sh toggle-mute "
-                                 + streamId];
-        pStreamAction.running = true;
-        quickRefresh.restart();
-    }
-
-    Timer {
-        id: quickRefresh
-        interval: 150
-        onTriggered: {
-            if (!pStreams.running) pStreams.running = true;
-        }
-    }
-
-    function getStreamIcon(name, bin, icon) {
-        var s = (String(name || "") + " " + String(bin || "") + " " + String(icon || "")).toLowerCase();
-
-        if (s.indexOf("telegram") >= 0) return String.fromCodePoint(0xF2C6); // 
-        if (s.indexOf("spotify") >= 0) return String.fromCodePoint(0xF1BC);  // 
-        if (s.indexOf("firefox") >= 0) return String.fromCodePoint(0xF269);  // 
-        if (s.indexOf("chrome") >= 0 || s.indexOf("chromium") >= 0 || s.indexOf("brave") >= 0 || s.indexOf("zen") >= 0) return String.fromCodePoint(0xF268); // 
-        if (s.indexOf("discord") >= 0 || s.indexOf("vesktop") >= 0 || s.indexOf("webcord") >= 0) return String.fromCodePoint(0xF392); // 
-        if (s.indexOf("steam") >= 0) return String.fromCodePoint(0xF1B6);    // 
-        if (s.indexOf("vlc") >= 0 || s.indexOf("mpv") >= 0 || s.indexOf("video") >= 0 || s.indexOf("player") >= 0 || s.indexOf("music") >= 0) return String.fromCodePoint(0xF144); // 
-        if (s.indexOf("game") >= 0 || s.indexOf("retroarch") >= 0 || s.indexOf("wine") >= 0 || s.indexOf("lutris") >= 0) return String.fromCodePoint(0xF11B); // 
-        return String.fromCodePoint(0xF028); //  Speaker
     }
 
     ColumnLayout {
@@ -918,189 +845,15 @@ Item {
                 }
             }
 
-            // ------------------------------------------ громкость приложений (микшер)
-        RowLayout {
-            Layout.fillWidth: true
-            Layout.topMargin: 4
-            spacing: 8
-
-            Text {
-                text: view.sys.tr("Громкость приложений")
-                color: view.sys.colMuted
-                font {
-                    family: view.sys.fontFam; pixelSize: view.sys.fontSize - 4
-                    bold: true; capitalization: Font.AllUppercase; letterSpacing: 1
-                }
-            }
-
-            Rectangle {
-                visible: view.streamsList.length > 0
-                Layout.preferredHeight: 16
-                Layout.preferredWidth: streamCountText.implicitWidth + 10
-                radius: 8
-                color: Qt.rgba(view.sys.colOn.r, view.sys.colOn.g, view.sys.colOn.b, 0.2)
-
-                Text {
-                    id: streamCountText
-                    anchors.centerIn: parent
-                    text: String(view.streamsList.length)
-                    color: view.sys.colOn
-                    font { family: view.sys.fontFam; pixelSize: 10; bold: true }
-                }
-            }
-
-            Item { Layout.fillWidth: true }
-        }
-
-        Repeater {
-            model: view.streamsList
-
-            Rectangle {
-                id: strCard
-                required property var modelData
-                required property int index
-
-                property int currentVolPct: modelData.volume_pct !== undefined ? modelData.volume_pct : Math.round((modelData.volume || 1.0) * 100)
-                property bool isMuted: modelData.muted || false
-
+            // ------------------------------------------ espectro ao vivo (Cava)
+            WaveBars {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 58
-                radius: 12
-                color: Qt.rgba(1, 1, 1, 0.05)
-                border.color: view.sys.colLine
-                border.width: 1
-
-                ColumnLayout {
-                    anchors.fill: parent
-                    anchors.margins: 9
-                    spacing: 4
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        Text {
-                            text: view.getStreamIcon(strCard.modelData.name, strCard.modelData.binary, strCard.modelData.icon)
-                            color: strCard.isMuted ? view.sys.colMuted : view.sys.colOn
-                            font { family: view.sys.fontFam; pixelSize: view.sys.iconSize - 2 }
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: strCard.modelData.name || strCard.modelData.binary || view.sys.tr("Приложение")
-                            color: view.sys.colFg
-                            elide: Text.ElideRight
-                            font {
-                                family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2
-                                bold: true
-                            }
-                        }
-
-                        Text {
-                            text: strCard.currentVolPct + "%"
-                            color: view.sys.colMuted
-                            font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 3 }
-                        }
-
-                        Text {
-                            text: strCard.isMuted ? String.fromCodePoint(0xF075F)
-                                : strCard.currentVolPct < 34 ? String.fromCodePoint(0xF057F)
-                                : strCard.currentVolPct < 67 ? String.fromCodePoint(0xF0580)
-                                                             : String.fromCodePoint(0xF057E)
-                            color: strCard.isMuted ? view.sys.colMuted : view.sys.colFg
-                            font { family: view.sys.fontFam; pixelSize: view.sys.iconSize - 3 }
-                            MouseArea {
-                                anchors.fill: parent
-                                anchors.margins: -6
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    strCard.isMuted = !strCard.isMuted;
-                                    view.toggleAppMute(strCard.modelData.id);
-                                }
-                            }
-                        }
-                    }
-
-                    // Ползунок громкости конкретного приложения (плавный, мгновенный прыжок)
-                    Item {
-                        id: appSl
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 18
-
-                        readonly property real pos: Math.max(0, Math.min(1, strCard.currentVolPct / 100))
-                        readonly property real usable: width - appKnob.width
-
-                        function setFromX(x) {
-                            var r = Math.max(0, Math.min(1, (x - appKnob.width / 2) / Math.max(1, usable)));
-                            var pct = Math.round(r * 100);
-                            strCard.currentVolPct = pct;
-                            view.setAppVolume(strCard.modelData.id, pct);
-                        }
-
-                        Rectangle {
-                            anchors.verticalCenter: parent.verticalCenter
-                            x: appKnob.width / 2
-                            width: parent.usable
-                            height: 4
-                            radius: 2
-                            color: Qt.rgba(1, 1, 1, 0.12)
-                            Rectangle {
-                                width: parent.width * appSl.pos
-                                height: parent.height
-                                radius: 2
-                                color: strCard.isMuted ? view.sys.colMuted : view.sys.colOn
-                            }
-                        }
-
-                        Rectangle {
-                            id: appKnob
-                            width: 14; height: 14; radius: 7
-                            anchors.verticalCenter: parent.verticalCenter
-                            x: appSl.pos * appSl.usable
-                            color: "#ffffff"
-                            border.color: view.sys.colBg
-                            border.width: view.sys.themeNothing ? 2 : 0
-                            scale: appDrag.pressed ? 1.25 : (appDrag.containsMouse ? 1.1 : 1.0)
-                            Behavior on scale { NumberAnimation { duration: 120; easing.type: Easing.OutBack } }
-                        }
-
-                        MouseArea {
-                            id: appDrag
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            preventStealing: true
-                            cursorShape: Qt.PointingHandCursor
-                            onPressed: mouse => {
-                                view.isUserDragging = true;
-                                appSl.setFromX(mouse.x);
-                            }
-                            onPositionChanged: mouse => {
-                                if (pressed) {
-                                    view.isUserDragging = true;
-                                    appSl.setFromX(mouse.x);
-                                }
-                            }
-                            onReleased: {
-                                view.isUserDragging = false;
-                            }
-                            onCanceled: {
-                                view.isUserDragging = false;
-                            }
-                        }
-                    }
-                }
+                Layout.preferredHeight: 88
+                Layout.topMargin: 4
+                barCount: 40
+                gap: 2
+                barColor: view.sys.colOn
+                active: view.visible
             }
-        }
-
-        Text {
-            Layout.fillWidth: true
-            visible: view.streamsList.length === 0
-            text: view.sys.tr("Нет активных приложений со звуком")
-            color: view.sys.colMuted
-            horizontalAlignment: Text.AlignHCenter
-            font { family: view.sys.fontFam; pixelSize: view.sys.fontSize - 2; italic: true }
-            Layout.topMargin: 4
-            Layout.bottomMargin: 4
-        }
     }
 }
